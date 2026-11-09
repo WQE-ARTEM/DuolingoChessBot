@@ -1,0 +1,77 @@
+name: Build DuolingoChessBot APK
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Compile Native Stockfish (arm64-v8a) via Android NDK
+        run: |
+          mkdir -p app/src/main/jniLibs/arm64-v8a
+          git clone --depth 1 --branch sf_16 https://github.com/official-stockfish/Stockfish.git /tmp/sf || true
+          if [ -d "/tmp/sf/src" ]; then
+            cd /tmp/sf/src
+            NDK_CLANG=$(find $ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin \
+              -name "aarch64-linux-android24-clang++" 2>/dev/null | head -n 1)
+            echo "NDK compiler: $NDK_CLANG"
+            if [ -n "$NDK_CLANG" ]; then
+              make -j$(nproc) ARCH=armv8 COMP=clang CXX="$NDK_CLANG" build || true
+              BIN=$(find . -maxdepth 1 -type f -executable -name "stockfish*" | head -n 1)
+              [ -z "$BIN" ] && BIN=$(find . -maxdepth 1 -type f -executable -not -name "*.sh" -not -name "*.o" | head -n 1)
+              if [ -n "$BIN" ] && [ -f "$BIN" ]; then
+                cp "$BIN" "$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a/libstockfish.so"
+                echo "✅ libstockfish.so (arm64-v8a) готов: $(ls -la $GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a/)"
+              else
+                echo "⚠️ Stockfish не собрался — используется Kotlin-движок (не критично)"
+              fi
+            fi
+          fi
+
+      - name: Ensure Gradle is available
+        run: |
+          if ! command -v gradle >/dev/null 2>&1; then
+            echo "Gradle не найден, устанавливаю 8.5 вручную"
+            wget -q https://services.gradle.org/distributions/gradle-8.5-bin.zip
+            unzip -q gradle-8.5-bin.zip
+            echo "$PWD/gradle-8.5/bin" >> $GITHUB_PATH
+          fi
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.5'
+
+      - name: Assemble Debug APK
+        run: gradle assembleDebug --no-daemon --stacktrace
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DuolingoChessBot-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Publish APK to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        if: success()
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: "DuolingoChessBot v1.0.${{ github.run_number }}"
+          files: app/build/outputs/apk/debug/app-debug.apk
+          generate_release_notes: true
