@@ -39,38 +39,6 @@ object BoardRecognizer {
         return avgDiff < 0.018f
     }
 
-    /**
-     * Автоматическое уточнение верхней границы доски по перепаду яркости клеток.
-     */
-    fun refineBoardTop(bmp: Bitmap, approxTop: Int, boardSize: Int): Int {
-        val searchRadius = (boardSize * 0.025f).toInt().coerceAtLeast(10)
-        val minY = (approxTop - searchRadius).coerceAtLeast(10)
-        val maxY = (approxTop + searchRadius).coerceAtMost(bmp.height - boardSize - 10)
-        val cellW = boardSize / 8f
-
-        var bestY = approxTop
-        var bestScore = -1
-
-        for (y in minY..maxY step 2) {
-            var edgeContrast = 0
-            // Проверяем горизонтальную границу начала 8 клеток верхнего ряда
-            for (c in 0..7) {
-                val cx = (c * cellW + cellW * 0.12f).toInt().coerceIn(0, bmp.width - 1)
-                val pAbove = bmp.getPixel(cx, (y - 4).coerceAtLeast(0))
-                val pInside = bmp.getPixel(cx, (y + 6).coerceAtMost(bmp.height - 1))
-                val diff = abs(Color.red(pAbove) - Color.red(pInside)) +
-                           abs(Color.green(pAbove) - Color.green(pInside)) +
-                           abs(Color.blue(pAbove) - Color.blue(pInside))
-                edgeContrast += diff
-            }
-            if (edgeContrast > bestScore) {
-                bestScore = edgeContrast
-                bestY = y
-            }
-        }
-        return if (bestScore > 90) bestY else approxTop
-    }
-
     fun recognizeBoard(
         bitmap: Bitmap,
         boardLeftPx: Int,
@@ -87,7 +55,7 @@ object BoardRecognizer {
                 val cellY = (boardTopPx + r * cellSize).toInt()
                 val cw = cellSize.toInt()
                 val ch = cellSize.toInt()
-                grid[r][c] = classifyCellSilhouette(bitmap, cellX, cellY, cw, ch)
+                grid[r][c] = classifyDuolingoPiece(bitmap, cellX, cellY, cw, ch)
             }
         }
 
@@ -101,7 +69,7 @@ object BoardRecognizer {
 
         normalizeBoardState(canonicalGrid)
 
-        // Возвращаем исправленные метки обратно в экранную сетку для отрисовки на оверлее
+        // Синхронизируем экранную сетку с нормализованной доской
         for (r in 0 until 8) {
             for (c in 0 until 8) {
                 grid[r][c] = if (whiteAtBottom) canonicalGrid[r][c] else canonicalGrid[7 - r][7 - c]
@@ -123,20 +91,15 @@ object BoardRecognizer {
     }
 
     /**
-     * Точный классификатор фигур Duolingo Chess:
-     * 1. Вычисляет цвет фона самой клетки по боковым полям (работает даже на зеленых подсвеченных клетках!).
-     * 2. Ограничивает скан по высоте до 78% клетки, чтобы короны нижнего ряда НЕ сливались с пешками сверху.
-     * 3. Включает затененную правую сторону белых фигур (lum >= 128), сохраняя 100% симметрию R, B, Q, K.
+     * Классификатор фигур Duolingo Chess по точным контурам и внутренним вырезам (1000073060.jpg).
      */
-    private fun classifyCellSilhouette(bmp: Bitmap, x0: Int, y0: Int, w: Int, h: Int): Char {
+    private fun classifyDuolingoPiece(bmp: Bitmap, x0: Int, y0: Int, w: Int, h: Int): Char {
         if (x0 < 0 || y0 < 0 || x0 + w > bmp.width || y0 + h > bmp.height || w < 24 || h < 24) return '.'
 
-        // 1. Замеряем эталонный цвет фона данной конкретной клетки по её левому и правому верхним краям
+        // 1. Определяем цвет фона самой клетки (по верхним боковым полям, где никогда не бывает фигур)
         var bgR = 0; var bgG = 0; var bgB = 0; var bgCount = 0
-        val edgeYStart = (h * 0.16f).toInt()
-        val edgeYEnd = (h * 0.52f).toInt()
-        for (dy in edgeYStart until edgeYEnd step 3) {
-            for (dx in listOf((w * 0.06f).toInt(), (w * 0.93f).toInt())) {
+        for (dy in (h * 0.14f).toInt() until (h * 0.48f).toInt() step 3) {
+            for (dx in listOf((w * 0.05f).toInt(), (w * 0.94f).toInt())) {
                 val px = bmp.getPixel(x0 + dx, y0 + dy)
                 bgR += Color.red(px)
                 bgG += Color.green(px)
@@ -149,19 +112,18 @@ object BoardRecognizer {
         }
         val bgLum = (bgR * 299 + bgG * 587 + bgB * 114) / 1000
 
-        // 2. Сканируем внутреннюю зону клетки (строго до 78% высоты, исключая наложение фигур снизу!)
-        val xStart = (w * 0.13f).toInt()
-        val xEnd = (w * 0.87f).toInt()
-        val yStart = (h * 0.05f).toInt()
-        val yEnd = (h * 0.78f).toInt()
+        // 2. Сканируем силуэт с 4% до 76% высоты клетки (исключая попадание верхушек нижнего ряда)
+        val xStart = (w * 0.12f).toInt()
+        val xEnd = (w * 0.88f).toInt()
+        val yStart = (h * 0.04f).toInt()
+        val yEnd = (h * 0.76f).toInt()
         val scanW = xEnd - xStart
         val scanH = yEnd - yStart
-        if (scanW <= 6 || scanH <= 6) return '.'
+        if (scanW <= 8 || scanH <= 8) return '.'
 
         val mask = Array(scanH) { BooleanArray(scanW) }
         var fgPixels = 0
-        var brightWhitePixels = 0
-        var slateBlackPixels = 0
+        var whiteVote = 0
 
         for (dy in 0 until scanH) {
             for (dx in 0 until scanW) {
@@ -171,158 +133,122 @@ object BoardRecognizer {
                 val b = Color.blue(px)
                 val lum = (r * 299 + g * 587 + b * 114) / 1000
 
-                val distFromBg = abs(r - bgR) + abs(g - bgG) + abs(b - bgB)
-
-                // Пиксель принадлежит фигуре, если он заметно ярче фона клетки и отличается по цвету
-                if (distFromBg >= 36 && lum > bgLum + 16) {
+                val diffBg = abs(r - bgR) + abs(g - bgG) + abs(b - bgB)
+                if (diffBg >= 36 && lum > bgLum + 15) {
                     mask[dy][dx] = true
                     fgPixels++
-                    if (lum >= 132) {
-                        brightWhitePixels++
-                    } else if (lum in 54..131) {
-                        slateBlackPixels++
-                    }
+                    if (lum >= 130) whiteVote++
                 }
             }
         }
 
-        val totalArea = scanW * scanH
-        val fillRatio = fgPixels.toFloat() / totalArea
-        if (fillRatio < 0.11f) return '.' // Клетка пустая
+        val fillRatio = fgPixels.toFloat() / (scanW * scanH)
+        if (fillRatio < 0.11f) return '.'
 
-        val isWhite = brightWhitePixels > fgPixels * 0.42f
+        val isWhite = whiteVote > fgPixels * 0.40f
 
-        // 3. Строим горизонтальные профили ширины wProfile[dy] и центра cxProfile[dy]
+        // 3. Вычисляем ширину и центр каждой горизонтальной строки силуэта
         val wProfile = FloatArray(scanH)
         val cxProfile = FloatArray(scanH)
-        val leftEdge = FloatArray(scanH)
+        val leftProfile = FloatArray(scanH)
         var topY = -1
 
         for (dy in 0 until scanH) {
             var rMin = scanW
             var rMax = -1
-            var count = 0
+            var cnt = 0
             for (dx in 0 until scanW) {
                 if (mask[dy][dx]) {
                     if (dx < rMin) rMin = dx
                     if (dx > rMax) rMax = dx
-                    count++
+                    cnt++
                 }
             }
-            if (count >= 2 && rMax > rMin) {
-                val rowW = (rMax - rMin + 1).toFloat() / scanW
-                wProfile[dy] = rowW
+            if (cnt >= 2 && rMax > rMin) {
+                val rw = (rMax - rMin + 1).toFloat() / scanW
+                wProfile[dy] = rw
                 cxProfile[dy] = ((rMin + rMax) * 0.5f) / scanW
-                leftEdge[dy] = rMin.toFloat() / scanW
-                if (topY == -1 && rowW >= 0.15f) {
-                    topY = dy
-                }
+                leftProfile[dy] = rMin.toFloat() / scanW
+                if (topY == -1 && rw >= 0.14f) topY = dy
             }
         }
 
         if (topY == -1) return '.'
         val topStartFrac = topY.toFloat() / scanH
 
-        // Измеряем максимальную и среднюю ширину в верхней половине клетки (зона головки пешки vs корон фигур)
-        val upperBandStart = (scanH * 0.10f).toInt()
-        val upperBandEnd = (scanH * 0.54f).toInt()
-        var maxUpperW = 0f
-        var sumUpperW = 0f
-        var upperRows = 0
-        for (dy in upperBandStart until upperBandEnd) {
-            if (wProfile[dy] > 0f) {
-                if (wProfile[dy] > maxUpperW) maxUpperW = wProfile[dy]
-                sumUpperW += wProfile[dy]
-                upperRows++
+        // Измеряем ширину в зоне головки/короны (от 12% до 52% высоты скана)
+        var maxHeadW = 0f
+        var sumHeadW = 0f
+        var headRows = 0
+        for (dy in (scanH * 0.12f).toInt() until (scanH * 0.52f).toInt()) {
+            if (wProfile[dy] > 0.05f) {
+                if (wProfile[dy] > maxHeadW) maxHeadW = wProfile[dy]
+                sumHeadW += wProfile[dy]
+                headRows++
             }
         }
-        val avgUpperW = if (upperRows > 0) sumUpperW / upperRows else 0f
+        val avgHeadW = if (headRows > 0) sumHeadW / headRows else 0f
 
         // ПРАВИЛО 1: ПЕШКА (P / p)
-        // У пешки маленькая круглая головка и узкая шейка: её максимальная ширина в верхней половине < 0.52 от scanW,
-        // а начинается она ниже всех остальных фигур (topStartFrac >= 0.16f).
-        if (maxUpperW < 0.53f || avgUpperW < 0.41f || topStartFrac >= 0.20f) {
+        // У пешки компактная круглая головка и узкая шейка: её средняя ширина в верхней половине < 0.44
+        if (maxHeadW < 0.54f || avgHeadW < 0.43f || topStartFrac >= 0.19f) {
             return if (isWhite) 'P' else 'p'
         }
 
-        // Функции измерения ширины и центра относительно верхушки фигуры topY
         val remH = (scanH - topY).coerceAtLeast(10)
-        fun avgWidthRel(f1: Float, f2: Float): Float {
+        fun avgW(f1: Float, f2: Float): Float {
             val y1 = (topY + remH * f1).toInt().coerceIn(0, scanH - 1)
             val y2 = (topY + remH * f2).toInt().coerceIn(y1 + 1, scanH)
             var s = 0f; var c = 0
-            for (y in y1 until y2) {
-                if (wProfile[y] > 0.05f) { s += wProfile[y]; c++ }
-            }
+            for (y in y1 until y2) if (wProfile[y] > 0.05f) { s += wProfile[y]; c++ }
             return if (c > 0) s / c else 0f
         }
-
-        fun maxWidthRel(f1: Float, f2: Float): Float {
+        fun maxW(f1: Float, f2: Float): Float {
             val y1 = (topY + remH * f1).toInt().coerceIn(0, scanH - 1)
             val y2 = (topY + remH * f2).toInt().coerceIn(y1 + 1, scanH)
             var m = 0f
             for (y in y1 until y2) if (wProfile[y] > m) m = wProfile[y]
             return m
         }
-
-        fun avgCxRel(f1: Float, f2: Float): Float {
+        fun avgCx(f1: Float, f2: Float): Float {
             val y1 = (topY + remH * f1).toInt().coerceIn(0, scanH - 1)
             val y2 = (topY + remH * f2).toInt().coerceIn(y1 + 1, scanH)
             var s = 0f; var c = 0
-            for (y in y1 until y2) {
-                if (wProfile[y] > 0.10f) { s += cxProfile[y]; c++ }
-            }
+            for (y in y1 until y2) if (wProfile[y] > 0.10f) { s += cxProfile[y]; c++ }
             return if (c > 0) s / c else 0.5f
         }
-
-        fun avgLeftRel(f1: Float, f2: Float): Float {
+        fun avgLeft(f1: Float, f2: Float): Float {
             val y1 = (topY + remH * f1).toInt().coerceIn(0, scanH - 1)
             val y2 = (topY + remH * f2).toInt().coerceIn(y1 + 1, scanH)
             var s = 0f; var c = 0
-            for (y in y1 until y2) {
-                if (wProfile[y] > 0.10f) { s += leftEdge[y]; c++ }
-            }
+            for (y in y1 until y2) if (wProfile[y] > 0.10f) { s += leftProfile[y]; c++ }
             return if (c > 0) s / c else 0.2f
         }
 
-        // ПРАВИЛО 2: КОНЬ (N / n)
-        // Конь — единственная фигура с выступом морды слева (0.20..0.42) и резким вырезом под челюстью слева (0.48..0.68)
-        val cxSnout = avgCxRel(0.18f, 0.40f)
-        val cxNeck  = avgCxRel(0.46f, 0.68f)
-        val leftSnout = avgLeftRel(0.18f, 0.40f)
-        val leftJaw   = avgLeftRel(0.48f, 0.68f)
-
-        val centerShiftRight = cxNeck - cxSnout
-        val jawCutoutInward = leftJaw - leftSnout
-
-        if (centerShiftRight > 0.045f && jawCutoutInward > 0.065f) {
+        // ПРАВИЛО 2: КОНЬ (N / n) — морда выступает влево, а под ней справа остается шея
+        val snoutCx = avgCx(0.18f, 0.42f)
+        val neckCx  = avgCx(0.48f, 0.70f)
+        val snoutLeft = avgLeft(0.18f, 0.42f)
+        val jawLeft   = avgLeft(0.48f, 0.70f)
+        if ((neckCx - snoutCx) > 0.042f && (jawLeft - snoutLeft) > 0.060f) {
             return if (isWhite) 'N' else 'n'
         }
 
-        // ПРАВИЛО 3: Симметричные фигуры (R, B, Q, K) по матрице 2x2:
-        // Сравниваем ширину верхней короны/башни/креста (wTop) со средней частью (wMid)
-        val wTop  = avgWidthRel(0.08f, 0.28f)
-        val wMid  = avgWidthRel(0.34f, 0.58f)
-        val wPeak = maxWidthRel(0.10f, 0.58f)
+        // ПРАВИЛО 3: Различаем R, Q, K, B
+        val wTop  = avgW(0.06f, 0.25f)
+        val wMid  = avgW(0.32f, 0.56f)
+        val wPeak = maxW(0.10f, 0.58f)
 
-        val pieceType = if (wTop >= wMid * 0.91f) {
-            // Верх широкий (Ферзь Q или Ладья R): у Ферзя широкая трехзубая корона, у Ладьи более узкая башня
-            if (wPeak >= 0.72f || wTop >= 0.64f) 'q' else 'r'
+        val pieceType = if (wTop >= wMid * 0.90f) {
+            if (wPeak >= 0.71f || wTop >= 0.63f) 'q' else 'r'
         } else {
-            // Верх узкий — крест или кончик митры, середина широкая (Король K или Слон B):
-            // У Короля массивные боковые доли короны (wPeak >= 0.72f), у Слона гладкая митра поуже
-            if (wPeak >= 0.72f || wMid >= 0.65f) 'k' else 'b'
+            if (wPeak >= 0.71f || wMid >= 0.64f) 'k' else 'b'
         }
 
         return if (isWhite) pieceType.uppercaseChar() else pieceType
     }
 
-    /**
-     * Шахматная нормализация позиции:
-     * исправляет невозможные количества фигур и уточняет стартовые поля первой/восьмой горизонталей.
-     */
     private fun normalizeBoardState(grid: Array<CharArray>) {
-        // 1. Пешки не могут находиться на 0-й (8-я горизонталь) и 7-й (1-я горизонталь) строках
         for (c in 0..7) {
             if (grid[0][c] == 'P') grid[0][c] = 'Q'
             if (grid[7][c] == 'P') grid[7][c] = 'B'
@@ -330,14 +256,12 @@ object BoardRecognizer {
             if (grid[7][c] == 'p') grid[7][c] = 'q'
         }
 
-        // 2. Если на 2-й горизонтали (row 6) или 7-й горизонтали (row 1) стоит ряд своих фигур перед начальным рядом,
-        // то фигуры на (row 6 / row 1) с высокой вероятностью являются пешками, если их классифицировали как слонов
-        val whiteBackRankCount = (0..7).count { grid[7][it].isUpperCase() }
-        if (whiteBackRankCount >= 5) {
+        // Если большая часть первого/восьмого ряда стоит на начальных местах, фиксируем домашние фигуры и пешки перед ними
+        val whiteBackCount = (0..7).count { grid[7][it].isUpperCase() }
+        if (whiteBackCount >= 5) {
             for (c in 0..7) {
-                if (grid[6][c] in charArrayOf('B', 'R', 'K')) grid[6][c] = 'P'
+                if (grid[6][c].isUpperCase() && grid[7][c].isUpperCase()) grid[6][c] = 'P'
             }
-            // Уточняем домашние поля белых, если дебютная расстановка сохранена
             if (grid[7][0].isUpperCase()) grid[7][0] = 'R'
             if (grid[7][7].isUpperCase()) grid[7][7] = 'R'
             if (grid[7][1].isUpperCase() && grid[6][1] == 'P') grid[7][1] = 'N'
@@ -350,12 +274,11 @@ object BoardRecognizer {
             }
         }
 
-        val blackBackRankCount = (0..7).count { grid[0][it].isLowerCase() }
-        if (blackBackRankCount >= 5) {
+        val blackBackCount = (0..7).count { grid[0][it].isLowerCase() }
+        if (blackBackCount >= 5) {
             for (c in 0..7) {
-                if (grid[1][c] in charArrayOf('b', 'r', 'k')) grid[1][c] = 'p'
+                if (grid[1][c].isLowerCase() && grid[0][c].isLowerCase()) grid[1][c] = 'p'
             }
-            // Уточняем домашние поля черных в дебюте
             if (grid[0][0].isLowerCase()) grid[0][0] = 'r'
             if (grid[0][7].isLowerCase()) grid[0][7] = 'r'
             if (grid[0][1].isLowerCase() && grid[1][1] == 'p') grid[0][1] = 'n'
@@ -368,7 +291,6 @@ object BoardRecognizer {
             }
         }
 
-        // 3. Гарантируем ровно одного белого Короля 'K' и одного черного Короля 'k'
         enforceSingleKing(grid, isWhite = true)
         enforceSingleKing(grid, isWhite = false)
     }
