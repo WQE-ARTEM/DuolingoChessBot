@@ -25,25 +25,6 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Compile Native Stockfish (~3480 ELO) for arm64-v8a
-        run: |
-          mkdir -p "$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a"
-          git clone --depth 1 --branch sf_11 https://github.com/official-stockfish/Stockfish.git /tmp/sf
-          cd /tmp/sf/src
-          NDK_ROOT="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}"
-          if [ -z "$NDK_ROOT" ]; then
-            NDK_ROOT=$(find /usr/local/lib/android/sdk/ndk -maxdepth 1 -mindepth 1 -type d | sort -V | tail -n 1)
-          fi
-          NDK_CLANG=$(find "$NDK_ROOT" -name "aarch64-linux-android28-clang++" -o -name "aarch64-linux-android24-clang++" | sort -V | tail -n 1)
-          echo "Using NDK clang++: $NDK_CLANG"
-          "$NDK_CLANG" -fPIE -pie -O3 -std=c++17 -DNDEBUG -DIS_64BIT -DUSE_POPCNT \
-            -static-libstdc++ -pthread -Wl,-z,max-page-size=16384 \
-            -I. -Isyzygy \
-            *.cpp syzygy/tbprobe.cpp \
-            -o "$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a/libstockfish.so"
-          chmod 755 "$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a/libstockfish.so"
-          ls -lh "$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a/libstockfish.so"
-
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
         with:
