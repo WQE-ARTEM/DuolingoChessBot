@@ -83,9 +83,10 @@ class ChessOverlayService : Service() {
     override fun onCreate() {
         super.onCreate()
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        val bounds = windowManager.currentWindowMetrics.bounds
         val metrics = resources.displayMetrics
-        screenWidth = (metrics.widthPixels / 2) * 2
-        screenHeight = (metrics.heightPixels / 2) * 2
+        screenWidth = (bounds.width() / 2) * 2
+        screenHeight = (bounds.height() / 2) * 2
         screenDensity = metrics.densityDpi
 
         chessEngine = ChessEngine(this)
@@ -155,7 +156,7 @@ class ChessOverlayService : Service() {
     private fun setupOverlays() {
         val overlayView = BoardOverlayView(this).apply {
             boardLeftPx = 0f
-            boardTopPx = screenHeight * 0.349f
+            boardTopPx = screenHeight * 0.352f
             boardSizePx = screenWidth.toFloat()
         }
         boardOverlay = overlayView
