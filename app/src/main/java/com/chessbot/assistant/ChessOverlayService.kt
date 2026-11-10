@@ -155,7 +155,7 @@ class ChessOverlayService : Service() {
     private fun setupOverlays() {
         val overlayView = BoardOverlayView(this).apply {
             boardLeftPx = 0f
-            boardTopPx = screenHeight * 0.3585f
+            boardTopPx = screenHeight * 0.349f
             boardSizePx = screenWidth.toFloat()
         }
         boardOverlay = overlayView
@@ -250,14 +250,14 @@ class ChessOverlayService : Service() {
         val btnUp = createCompactButton("▲ Y-").apply {
             setOnClickListener {
                 val current = boardOverlay ?: return@setOnClickListener
-                current.boardTopPx -= 6f
+                current.boardTopPx -= 12f
                 current.invalidate()
             }
         }
         val btnDown = createCompactButton("▼ Y+").apply {
             setOnClickListener {
                 val current = boardOverlay ?: return@setOnClickListener
-                current.boardTopPx += 6f
+                current.boardTopPx += 12f
                 current.invalidate()
             }
         }
