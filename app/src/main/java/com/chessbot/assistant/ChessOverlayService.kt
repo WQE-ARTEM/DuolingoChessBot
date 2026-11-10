@@ -351,7 +351,8 @@ class ChessOverlayService : Service() {
                     }
 
                     val scan = withContext(Dispatchers.Default) {
-                        BoardRecognizer.recognizeBoard(frame, leftPx, topPx, sizePx, whiteBottom)
+                        val scan = BoardRecognizer.recognizeBoard(frame, leftPx, topPx, sizePx)
+                    boardOverlay.whiteAtBottom = scan.detectedWhiteAtBottom
                     }
 
                     overlay.detectedBoard = scan.board

@@ -11,6 +11,7 @@ data class ScanResult(
     val fen: String,
     val isValid: Boolean,
     val continueButtonActive: Boolean,
+    val detectedWhiteAtBottom: Boolean,
     val statusNote: String
 )
 
@@ -43,51 +44,64 @@ object BoardRecognizer {
         bitmap: Bitmap,
         boardLeftPx: Int,
         boardTopPx: Int,
-        boardSizePx: Int,
-        whiteAtBottom: Boolean
+        boardSizePx: Int
     ): ScanResult {
         val grid = Array(8) { CharArray(8) { '.' } }
         val cellSize = boardSizePx / 8f
 
-        // Сканируем сетку 8x8 сырыми данными
+        // Шаг 1: Автоматически определяем, какие фигуры внизу экрана (строка r=7)
+        var bottomWhiteVotes = 0
+        var bottomPieceCount = 0
+
+        for (c in 0 until 8) {
+            val cellX = (boardLeftPx + c * cellSize).toInt()
+            val cellY = (boardTopPx + 7 * cellSize).toInt()
+            val (isPiece, isWhite) = analyzeCellColorAndPresence(bitmap, cellX, cellY, cellSize.toInt(), cellSize.toInt())
+            if (isPiece) {
+                bottomPieceCount++
+                if (isWhite) bottomWhiteVotes++
+            }
+        }
+
+        // Если внизу больше светлых фигур — мы играем за белых, иначе за черных
+        val whiteAtBottom = bottomWhiteVotes >= (bottomPieceCount / 2).coerceAtLeast(1)
+
+        // Шаг 2: Сканируем всю доску с учетом определенной стороны
         for (r in 0 until 8) {
             for (c in 0 until 8) {
                 val cellX = (boardLeftPx + c * cellSize).toInt()
                 val cellY = (boardTopPx + r * cellSize).toInt()
                 val cw = cellSize.toInt()
                 val ch = cellSize.toInt()
-                grid[r][c] = classifyDuolingoPieceStrict(bitmap, cellX, cellY, cw, ch, whiteAtBottom, r)
+                grid[r][c] = classifyPiece(bitmap, cellX, cellY, cw, ch, whiteAtBottom, r)
             }
         }
 
-        // Каноническая матрица для FEN
         val canonicalGrid = Array(8) { CharArray(8) { '.' } }
         for (r in 0 until 8) {
             for (c in 0 until 8) {
                 if (whiteAtBottom) {
                     canonicalGrid[r][c] = grid[r][c]
                 } else {
-                    // При игре за черных: экранный верх (r=0) — это 8-я горизонталь белых (соперник), 
-                    // а экранный низ (r=7) — это 1-я горизонталь черных (наши фигуры).
-                    canonicalGrid[r][c] = grid[7 - r][7 - c]
+                    canonicalGrid[r][c] = invertPiece(grid[7 - r][7 - c])
                 }
             }
         }
 
         enforceKings(canonicalGrid)
 
-        // Возвращаем правильные символы для отрисовки оверлея
+        // Возвращаем в экранную сетку для оверлея
         for (r in 0 until 8) {
             for (c in 0 until 8) {
                 if (whiteAtBottom) {
                     grid[r][c] = canonicalGrid[r][c]
                 } else {
-                    grid[r][c] = canonicalGrid[7 - r][7 - c]
+                    grid[r][c] = invertPiece(canonicalGrid[7 - r][7 - c])
                 }
             }
         }
 
-        // Ход всегда определяется по панели управления
+        // Чей ход: если мы белые — ход белых ('w'), если черные — ход черных ('b')
         val sideToMove = if (whiteAtBottom) 'w' else 'b'
         val fen = buildFen(canonicalGrid, sideToMove)
         val (valid, note) = validatePosition(canonicalGrid)
@@ -98,21 +112,14 @@ object BoardRecognizer {
             fen = fen,
             isValid = valid,
             continueButtonActive = continueActive,
+            detectedWhiteAtBottom = whiteAtBottom,
             statusNote = note
         )
     }
 
-    /**
-     * Строгий классификатор с учетом расположения игрока (белые снизу или черные снизу).
-     * Верхние ряды экрана (r < 2) при игре за черных — это фигуры белых (соперник), 
-     * а нижние ряды (r > 5) — черные фигуры (игрок).
-     */
-    private fun classifyDuolingoPieceStrict(
-        bmp: Bitmap, x0: Int, y0: Int, w: Int, h: Int, whiteAtBottom: Boolean, screenRow: Int
-    ): Char {
-        if (x0 < 0 || y0 < 0 || x0 + w > bmp.width || y0 + h > bmp.height || w < 24 || h < 24) return '.'
+    private fun analyzeCellColorAndPresence(bmp: Bitmap, x0: Int, y0: Int, w: Int, h: Int): Pair<Boolean, Boolean> {
+        if (x0 < 0 || y0 < 0 || x0 + w > bmp.width || y0 + h > bmp.height || w < 24 || h < 24) return false to false
 
-        // Определяем цвет фона клетки
         var bgR = 0; var bgG = 0; var bgB = 0; var bgCount = 0
         for (dy in (h * 0.15f).toInt() until (h * 0.45f).toInt() step 3) {
             for (dx in listOf((w * 0.08f).toInt(), (w * 0.92f).toInt())) {
@@ -124,61 +131,48 @@ object BoardRecognizer {
         if (bgCount > 0) { bgR /= bgCount; bgG /= bgCount; bgB /= bgCount }
         val bgLum = (bgR * 299 + bgG * 587 + bgB * 114) / 1000
 
-        val xStart = (w * 0.12f).toInt()
-        val xEnd = (w * 0.88f).toInt()
-        val yStart = (h * 0.05f).toInt()
-        val yEnd = (h * 0.75f).toInt()
-        val scanW = xEnd - xStart
-        val scanH = yEnd - yStart
-        if (scanW <= 8 || scanH <= 8) return '.'
+        var fg = 0; var whiteVotes = 0
+        val xStart = (w * 0.12f).toInt(); val xEnd = (w * 0.88f).toInt()
+        val yStart = (h * 0.05f).toInt(); val yEnd = (h * 0.75f).toInt()
 
-        var fgPixels = 0
-        var whiteVote = 0
-
-        for (dy in 0 until scanH) {
-            for (dx in 0 until scanW) {
-                val px = bmp.getPixel(x0 + xStart + dx, y0 + yStart + dy)
+        for (dy in yStart until yEnd step 2) {
+            for (dx in xStart until xEnd step 2) {
+                val px = bmp.getPixel(x0 + dx, y0 + dy)
                 val r = Color.red(px); val g = Color.green(px); val b = Color.blue(px)
                 val lum = (r * 299 + g * 587 + b * 114) / 1000
-                val diffBg = abs(r - bgR) + abs(g - bgG) + abs(b - bgB)
-                if (diffBg >= 34 && lum > bgLum + 14) {
-                    fgPixels++
-                    if (lum >= 125) whiteVote++
+                val diff = abs(r - bgR) + abs(g - bgG) + abs(b - bgB)
+                if (diff >= 32 && lum > bgLum + 12) {
+                    fg++
+                    if (lum >= 120) whiteVotes++
                 }
             }
         }
 
-        val fillRatio = fgPixels.toFloat() / (scanW * scanH)
-        if (fillRatio < 0.10f) return '.'
+        val present = fg > (xEnd - xStart) * (yEnd - yStart) * 0.08f
+        val isWhite = whiteVotes > fg * 0.38f
+        return present to isWhite
+    }
 
-        // Жесткая привязка по цветам Duolingo Chess:
-        // Верхние ряды экрана при игре за черных — это белые фигуры соперника
-        // Нижние ряды экрана при игре за черных — это черные фигуры игрока
-        val isWhitePiece = if (whiteAtBottom) {
-            screenRow >= 4 || whiteVote > fgPixels * 0.38f
-        } else {
-            screenRow <= 3 && whiteVote > fgPixels * 0.35f
-        }
+    private fun classifyPiece(
+        bmp: Bitmap, x0: Int, y0: Int, w: Int, h: Int, whiteAtBottom: Boolean, screenRow: Int
+    ): Char {
+        val (hasPiece, isWhite) = analyzeCellColorAndPresence(bmp, x0, y0, w, h)
+        if (!hasPiece) return '.'
 
-        // Упрощенное определение типа по плотности и высоте
-        val pieceChar = if (fillRatio < 0.28f) {
-            'p' // Пешка
-        } else if (fillRatio > 0.52f) {
-            'q' // Ферзь или Король
-        } else {
-            'n' // Конь, Слон или Ладья
-        }
+        val pieceChar = if (screenRow in 2..5) 'p' else 'q'
+        return if (isWhite) pieceChar.uppercaseChar() else pieceChar
+    }
 
-        return if (isWhitePiece) pieceChar.uppercaseChar() else pieceChar
+    private fun invertPiece(p: Char): Char {
+        if (p == '.') return '.'
+        return if (p.isUpperCase()) p.lowercaseChar() else p.uppercaseChar()
     }
 
     private fun enforceKings(grid: Array<CharArray>) {
         var wk = false; var bk = false
-        for (r in 0..7) {
-            for (c in 0..7) {
-                if (grid[r][c] == 'K') wk = true
-                if (grid[r][c] == 'k') bk = true
-            }
+        for (r in 0..7) for (c in 0..7) {
+            if (grid[r][c] == 'K') wk = true
+            if (grid[r][c] == 'k') bk = true
         }
         if (!wk) grid[7][4] = 'K'
         if (!bk) grid[0][4] = 'k'
@@ -205,14 +199,12 @@ object BoardRecognizer {
 
     private fun validatePosition(grid: Array<CharArray>): Pair<Boolean, String> {
         var wk = 0; var bk = 0; var total = 0
-        for (r in 0..7) {
-            for (c in 0..7) {
-                when (grid[r][c]) {
-                    'K' -> { wk++; total++ }
-                    'k' -> { bk++; total++ }
-                    '.' -> {}
-                    else -> total++
-                }
+        for (r in 0..7) for (c in 0..7) {
+            when (grid[r][c]) {
+                'K' -> { wk++; total++ }
+                'k' -> { bk++; total++ }
+                '.' -> {}
+                else -> total++
             }
         }
         if (wk != 1 || bk != 1) return false to "Ожидание доски (K:$wk k:$bk)"
