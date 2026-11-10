@@ -49,45 +49,47 @@ object BoardRecognizer {
         val grid = Array(8) { CharArray(8) { '.' } }
         val cellSize = boardSizePx / 8f
 
+        // Сканируем сетку 8x8 сырыми данными
         for (r in 0 until 8) {
             for (c in 0 until 8) {
                 val cellX = (boardLeftPx + c * cellSize).toInt()
                 val cellY = (boardTopPx + r * cellSize).toInt()
                 val cw = cellSize.toInt()
                 val ch = cellSize.toInt()
-                grid[r][c] = classifyDuolingoPiece(bitmap, cellX, cellY, cw, ch)
+                grid[r][c] = classifyDuolingoPieceStrict(bitmap, cellX, cellY, cw, ch, whiteAtBottom, r)
             }
         }
 
-        // Если whiteAtBottom == false (играем за черных), то визуальный верх экрана (r=0) 
-        // соответствует 1-й горизонтали белых (рядам соперника), а нижний ряд (r=7) — 8-й горизонтали черных.
+        // Каноническая матрица для FEN
         val canonicalGrid = Array(8) { CharArray(8) { '.' } }
         for (r in 0 until 8) {
             for (c in 0 until 8) {
                 if (whiteAtBottom) {
                     canonicalGrid[r][c] = grid[r][c]
                 } else {
-                    // Разворачиваем доску по вертикали и горизонтали для правильного FEN черных
-                    canonicalGrid[r][c] = invertPieceColor(grid[7 - r][7 - c])
+                    // При игре за черных: экранный верх (r=0) — это 8-я горизонталь белых (соперник), 
+                    // а экранный низ (r=7) — это 1-я горизонталь черных (наши фигуры).
+                    canonicalGrid[r][c] = grid[7 - r][7 - c]
                 }
             }
         }
 
-        normalizeBoardState(canonicalGrid, whiteAtBottom)
+        enforceKings(canonicalGrid)
 
-        // Возвращаем метки в экранные координаты для отрисовки оверлея
+        // Возвращаем правильные символы для отрисовки оверлея
         for (r in 0 until 8) {
             for (c in 0 until 8) {
                 if (whiteAtBottom) {
                     grid[r][c] = canonicalGrid[r][c]
                 } else {
-                    grid[r][c] = invertPieceColor(canonicalGrid[7 - r][7 - c])
+                    grid[r][c] = canonicalGrid[7 - r][7 - c]
                 }
             }
         }
 
-        val sideToMove = 'b' // При игре за черных бот рассчитывает ход черных
-        val fen = buildMidGameFen(canonicalGrid, sideToMove)
+        // Ход всегда определяется по панели управления
+        val sideToMove = if (whiteAtBottom) 'w' else 'b'
+        val fen = buildFen(canonicalGrid, sideToMove)
         val (valid, note) = validatePosition(canonicalGrid)
         val continueActive = detectContinueButton(bitmap)
 
@@ -100,17 +102,20 @@ object BoardRecognizer {
         )
     }
 
-    private fun invertPieceColor(p: Char): Char {
-        if (p == '.') return '.'
-        return if (p.isUpperCase()) p.lowercaseChar() else p.uppercaseChar()
-    }
-
-    private fun classifyDuolingoPiece(bmp: Bitmap, x0: Int, y0: Int, w: Int, h: Int): Char {
+    /**
+     * Строгий классификатор с учетом расположения игрока (белые снизу или черные снизу).
+     * Верхние ряды экрана (r < 2) при игре за черных — это фигуры белых (соперник), 
+     * а нижние ряды (r > 5) — черные фигуры (игрок).
+     */
+    private fun classifyDuolingoPieceStrict(
+        bmp: Bitmap, x0: Int, y0: Int, w: Int, h: Int, whiteAtBottom: Boolean, screenRow: Int
+    ): Char {
         if (x0 < 0 || y0 < 0 || x0 + w > bmp.width || y0 + h > bmp.height || w < 24 || h < 24) return '.'
 
+        // Определяем цвет фона клетки
         var bgR = 0; var bgG = 0; var bgB = 0; var bgCount = 0
-        for (dy in (h * 0.14f).toInt() until (h * 0.48f).toInt() step 3) {
-            for (dx in listOf((w * 0.05f).toInt(), (w * 0.94f).toInt())) {
+        for (dy in (h * 0.15f).toInt() until (h * 0.45f).toInt() step 3) {
+            for (dx in listOf((w * 0.08f).toInt(), (w * 0.92f).toInt())) {
                 val px = bmp.getPixel(x0 + dx, y0 + dy)
                 bgR += Color.red(px); bgG += Color.green(px); bgB += Color.blue(px)
                 bgCount++
@@ -121,13 +126,12 @@ object BoardRecognizer {
 
         val xStart = (w * 0.12f).toInt()
         val xEnd = (w * 0.88f).toInt()
-        val yStart = (h * 0.04f).toInt()
-        val yEnd = (h * 0.76f).toInt()
+        val yStart = (h * 0.05f).toInt()
+        val yEnd = (h * 0.75f).toInt()
         val scanW = xEnd - xStart
         val scanH = yEnd - yStart
         if (scanW <= 8 || scanH <= 8) return '.'
 
-        val mask = Array(scanH) { BooleanArray(scanW) }
         var fgPixels = 0
         var whiteVote = 0
 
@@ -137,81 +141,50 @@ object BoardRecognizer {
                 val r = Color.red(px); val g = Color.green(px); val b = Color.blue(px)
                 val lum = (r * 299 + g * 587 + b * 114) / 1000
                 val diffBg = abs(r - bgR) + abs(g - bgG) + abs(b - bgB)
-                if (diffBg >= 36 && lum > bgLum + 15) {
-                    mask[dy][dx] = true
+                if (diffBg >= 34 && lum > bgLum + 14) {
                     fgPixels++
-                    if (lum >= 130) whiteVote++
+                    if (lum >= 125) whiteVote++
                 }
             }
         }
 
         val fillRatio = fgPixels.toFloat() / (scanW * scanH)
-        if (fillRatio < 0.11f) return '.'
+        if (fillRatio < 0.10f) return '.'
 
-        val isWhite = whiteVote > fgPixels * 0.40f
-
-        val wProfile = FloatArray(scanH)
-        var topY = -1
-
-        for (dy in 0 until scanH) {
-            var rMin = scanW; var rMax = -1; var cnt = 0
-            for (dx in 0 until scanW) {
-                if (mask[dy][dx]) {
-                    if (dx < rMin) rMin = dx
-                    if (dx > rMax) rMax = dx
-                    cnt++
-                }
-            }
-            if (cnt >= 2 && rMax > rMin) {
-                val rw = (rMax - rMin + 1).toFloat() / scanW
-                wProfile[dy] = rw
-                if (topY == -1 && rw >= 0.14f) topY = dy
-            }
+        // Жесткая привязка по цветам Duolingo Chess:
+        // Верхние ряды экрана при игре за черных — это белые фигуры соперника
+        // Нижние ряды экрана при игре за черных — это черные фигуры игрока
+        val isWhitePiece = if (whiteAtBottom) {
+            screenRow >= 4 || whiteVote > fgPixels * 0.38f
+        } else {
+            screenRow <= 3 && whiteVote > fgPixels * 0.35f
         }
 
-        if (topY == -1) return '.'
-        val topStartFrac = topY.toFloat() / scanH
-
-        var maxHeadW = 0f; var sumHeadW = 0f; var headRows = 0
-        for (dy in (scanH * 0.12f).toInt() until (scanH * 0.52f).toInt()) {
-            if (wProfile[dy] > 0.05f) {
-                if (wProfile[dy] > maxHeadW) maxHeadW = wProfile[dy]
-                sumHeadW += wProfile[dy]; headRows++
-            }
-        }
-        val avgHeadW = if (headRows > 0) sumHeadW / headRows else 0f
-
-        if (maxHeadW < 0.54f || avgHeadW < 0.43f || topStartFrac >= 0.19f) {
-            return if (isWhite) 'P' else 'p'
+        // Упрощенное определение типа по плотности и высоте
+        val pieceChar = if (fillRatio < 0.28f) {
+            'p' // Пешка
+        } else if (fillRatio > 0.52f) {
+            'q' // Ферзь или Король
+        } else {
+            'n' // Конь, Слон или Ладья
         }
 
-        val pieceType = if (maxHeadW >= 0.71f) 'q' else 'k'
-        return if (isWhite) pieceType.uppercaseChar() else pieceType
+        return if (isWhitePiece) pieceChar.uppercaseChar() else pieceChar
     }
 
-    private fun normalizeBoardState(grid: Array<CharArray>, whiteAtBottom: Boolean) {
-        enforceSingleKing(grid, isWhite = true)
-        enforceSingleKing(grid, isWhite = false)
-    }
-
-    private fun enforceSingleKing(grid: Array<CharArray>, isWhite: Boolean) {
-        val kingChar = if (isWhite) 'K' else 'k'
-        val queens = mutableListOf<Pair<Int, Int>>()
-        for (r in 0..7) for (c in 0..7) if (grid[r][c] == kingChar) queens.add(r to c)
-        if (queens.isEmpty()) {
-            loop@ for (r in 0..7) {
-                for (c in 0..7) {
-                    val ch = grid[r][c]
-                    if (ch != '.' && ch.isUpperCase() == isWhite) {
-                        grid[r][c] = kingChar
-                        break@loop
-                    }
-                }
+    private fun enforceKings(grid: Array<CharArray>) {
+        var wk = false; var bk = false
+        for (r in 0..7) {
+            for (c in 0..7) {
+                if (grid[r][c] == 'K') wk = true
+                if (grid[r][c] == 'k') bk = true
             }
         }
+        if (!wk) grid[7][4] = 'K'
+        if (!bk) grid[0][4] = 'k'
     }
 
-    private fun buildMidGameFen(grid: Array<CharArray>, activeColor: Char): String {
+    private fun buildFen(grid: Array<CharArray>, activeColor: Char): String {
         val sb = StringBuilder()
         for (r in 0..7) {
             var empty = 0
