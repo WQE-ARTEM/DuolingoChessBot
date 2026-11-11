@@ -85,20 +85,18 @@ object BoardRecognizer {
             }
         }
 
-        // Оставляем ровно по одному королю на каждую сторону (лучшего кандидата)
+        // Оставляем ровно по одному королю на каждую сторону (лучшего по очкам креста/формы)
         enforceSingleKing(board, kingScore, isWhite = true)
         enforceSingleKing(board, kingScore, isWhite = false)
 
-        // Если это стартовая расстановка (все 32 клетки на рядах 0,1,6,7 заняты, а центр пуст) — фиксируем точную начальную расстановку
-        val occupiedStart = (0 until 8).count { board[0][it] != '.' } +
-                (0 until 8).count { board[1][it] != '.' } +
-                (0 until 8).count { board[6][it] != '.' } +
-                (0 until 8).count { board[7][it] != '.' }
-        val emptyMiddle = (2..5).sumOf { r -> (0 until 8).count { c -> board[r][c] == '.' } }
+        // Проверка на начальную позицию партии (когда оба ряда фигур 0 и 7 заполнены, а центр 2..5 пуст)
+        val rank0Count = (0 until 8).count { board[0][it] != '.' }
+        val rank7Count = (0 until 8).count { board[7][it] != '.' }
+        val emptyCenter = (2..5).sumOf { r -> (0 until 8).count { c -> board[r][c] == '.' } }
 
-        if (occupiedStart >= 30 && emptyMiddle >= 30) {
+        if (rank0Count == 8 && rank7Count == 8 && emptyCenter >= 30) {
             val backRank = charArrayOf('r', 'n', 'b', 'q', 'k', 'b', 'n', 'r')
-            val bottomWhite = board[7].count { it.isUpperCase() } >= board[0].count { it.isUpperCase() }
+            val bottomWhite = board[7].count { it.isUpperCase() } >= 4
             for (c in 0 until 8) {
                 val p = if (bottomWhite) backRank[c] else if (c == 3) 'k' else if (c == 4) 'q' else backRank[c]
                 board[0][c] = if (bottomWhite) p else p.uppercaseChar()
@@ -120,7 +118,6 @@ object BoardRecognizer {
             }
         }
 
-        // Если король был перекрыт зелёной стрелкой, восстанавливаем его на наиболее вероятной клетке
         if (!whiteKing && totalPieces >= 3) {
             val bestPos = findFallbackKingSquare(board, kingScore, isWhite = true)
             if (bestPos != null) {
@@ -160,78 +157,70 @@ object BoardRecognizer {
         col: Int
     ): Pair<Char, Int> {
         val N = 32
-        val fg = Array(N) { BooleanArray(N) }
-        val darkHole = Array(N) { BooleanArray(N) }
+        val isLightSquare = (row + col) % 2 == 0
 
-        var whitePixels = 0
-        var blackPixels = 0
-        var validSamples = 0
-
-        // Оцениваем яркость фона конкретной клетки по краям (внизу/справа в углах)
+        // Семплируем углы клетки для эталона фона доски (исключая зелёные линии и текст оверлея)
         var bgLumSum = 0
         var bgCount = 0
-        val cornerCoords = arrayOf(
-            3 to 28, 4 to 28, 27 to 28, 28 to 28,
-            27 to 3, 28 to 3, 28 to 4, 3 to 20, 28 to 20
+        val cornerSamples = arrayOf(
+            2 to 29, 3 to 29, 28 to 29, 29 to 29,
+            28 to 2, 29 to 2, 29 to 3, 2 to 24, 29 to 24
         )
-        for ((gx, gy) in cornerCoords) {
+        for ((gx, gy) in cornerSamples) {
             val px = (cellX + (gx + 0.5f) * cellW / N).toInt().coerceIn(0, bmp.width - 1)
             val py = (cellY + (gy + 0.5f) * cellH / N).toInt().coerceIn(0, bmp.height - 1)
             val c = bmp.getPixel(px, py)
             val r = Color.red(c)
             val g = Color.green(c)
             val b = Color.blue(c)
-            if (!(g > r + 35 && g > b + 20)) {
+            if (!isOverlayColor(r, g, b)) {
                 bgLumSum += (r * 299 + g * 587 + b * 114) / 1000
                 bgCount++
             }
         }
-        val isLightSquare = (row + col) % 2 == 0
-        val bgLum = if (bgCount > 0) bgLumSum / bgCount else if (isLightSquare) 56 else 35
+        val bgLum = if (bgCount > 0) (bgLumSum / bgCount).coerceIn(24, 68) else if (isLightSquare) 54 else 35
 
         val lumGrid = Array(N) { IntArray(N) { bgLum } }
-        val greenOverlay = Array(N) { BooleanArray(N) }
+        val fg = Array(N) { BooleanArray(N) }
 
-        for (gy in 2 until N - 2) {
-            for (gx in 3 until N - 3) {
-                // Пропускаем левый верхний угол клетки, где оверлей рисует мелкий текст (wQ, bP и т.д.)
-                if (gx < 10 && gy < 7) continue
+        var whiteVotes = 0
+        var blackVotes = 0
+
+        for (gy in 2 until N - 1) {
+            for (gx in 2 until N - 2) {
+                // Игнорируем левый верхний угол, где рисуется метка оверлея (wP, bQ и т.д.)
+                if (gx <= 10 && gy <= 7) continue
 
                 val px = (cellX + (gx + 0.5f) * cellW / N).toInt().coerceIn(0, bmp.width - 1)
                 val py = (cellY + (gy + 0.5f) * cellH / N).toInt().coerceIn(0, bmp.height - 1)
-                val color = bmp.getPixel(px, py)
-                val r = Color.red(color)
-                val g = Color.green(color)
-                val b = Color.blue(color)
-                val lum = (r * 299 + g * 587 + b * 114) / 1000
+                val c = bmp.getPixel(px, py)
+                val r = Color.red(c)
+                val g = Color.green(c)
+                val b = Color.blue(c)
 
-                // Фильтруем ярко-зелёную стрелку и рамку оверлея
-                if (g > r + 38 && g > b + 22 && lum < 200) {
-                    greenOverlay[gy][gx] = true
+                // Фильтруем зелёную стрелку и оранжевый пунктир оверлея
+                if (isOverlayColor(r, g, b)) {
+                    lumGrid[gy][gx] = -1
                     continue
                 }
 
+                val lum = (r * 299 + g * 587 + b * 114) / 1000
                 lumGrid[gy][gx] = lum
-                validSamples++
 
-                // Белые фигуры в Duolingo: ярко-белые/голубоватые (lum >= 162)
-                if (lum >= 162 && b >= r - 20) {
-                    whitePixels++
-                }
-                // Чёрные фигуры в Duolingo: серо-синие (#597584, lum 75..158), заметно светлее тёмно-бирюзовой клетки
-                else if (lum in 74..160 && b >= r + 4 && g >= r && lum >= bgLum + 18) {
-                    blackPixels++
+                // Игнорируем кружок подсказки хода по центру пустой клетки (небольшая точка в gy 13..18, gx 13..18)
+                if (lum >= 158 && b >= r - 15) {
+                    whiteVotes++
+                } else if (lum in 68..157 && b >= r + 3 && lum >= bgLum + 15) {
+                    blackVotes++
                 }
             }
         }
 
-        if (validSamples < 100) return '.' to -1000
-
-        // Порог с запасом под пешки (пешка занимает ~13-25% клетки, крупные фигуры ~30-55%)
+        // Порог присутствия фигуры (отсекает серые кружки-подсказки на пустых полях, у которых площадь ~12-20 пикселей)
         val isWhitePiece: Boolean
-        if (whitePixels >= 48 && whitePixels > blackPixels) {
+        if (whiteVotes >= 45 && whiteVotes >= blackVotes) {
             isWhitePiece = true
-        } else if (blackPixels >= 42) {
+        } else if (blackVotes >= 40) {
             isWhitePiece = false
         } else {
             return '.' to -1000
@@ -240,29 +229,35 @@ object BoardRecognizer {
         var totalFg = 0
         var topY = 31
         var bottomY = 0
-        val rowWidth = IntArray(N)
+        var minX = 31
+        var maxX = 0
         val rowLeft = IntArray(N) { 31 }
         val rowRight = IntArray(N) { 0 }
+        val rowWidth = IntArray(N)
+        val rowCount = IntArray(N)
 
-        for (gy in 2 until N - 2) {
-            for (gx in 3 until N - 3) {
-                if (gx < 10 && gy < 7) continue
-                if (greenOverlay[gy][gx]) continue
+        for (gy in 2 until N - 1) {
+            for (gx in 2 until N - 2) {
+                if (gx <= 10 && gy <= 7) continue
                 val lum = lumGrid[gy][gx]
-                val isFg = if (isWhitePiece) {
-                    lum >= 155
+                if (lum < 0) continue
+
+                val isPiecePixel = if (isWhitePiece) {
+                    lum >= 145
                 } else {
-                    lum in 72..161 && lum >= bgLum + 16
+                    lum in 66..162 && lum >= bgLum + 14
                 }
-                if (isFg) {
+
+                if (isPiecePixel) {
                     fg[gy][gx] = true
                     totalFg++
+                    rowCount[gy]++
                     if (gy < topY) topY = gy
                     if (gy > bottomY) bottomY = gy
+                    if (gx < minX) minX = gx
+                    if (gx > maxX) maxX = gx
                     if (gx < rowLeft[gy]) rowLeft[gy] = gx
                     if (gx > rowRight[gy]) rowRight[gy] = gx
-                } else if (lum <= 48) {
-                    darkHole[gy][gx] = true
                 }
             }
             if (rowRight[gy] >= rowLeft[gy]) {
@@ -270,111 +265,169 @@ object BoardRecognizer {
             }
         }
 
-        if (totalFg < 40 || bottomY <= topY + 4) return '.' to -1000
+        val pieceHeight = bottomY - topY + 1
+        val pieceWidth = maxX - minX + 1
+        if (totalFg < 44 || pieceHeight < 9 || pieceWidth < 8) return '.' to -1000
 
-        // Считаем ключевые морфологические признаки фигуры
-        var upperBandFg = 0 // gy in 2..7 (верхняя шапка фигуры)
-        for (gy in 2..7) for (gx in 4..27) if (fg[gy][gx]) upperBandFg++
+        // Уточняем реальную верхушку фигуры (игнорируем одиночные шумовые пиксели)
+        while (topY < bottomY && rowWidth[topY] < 2) topY++
+        val h = bottomY - topY + 1
+        if (h < 9) return '.' to -1000
 
-        val crownWidth = (6..10).maxOf { rowWidth[it] }          // ширина верхней короны
-        val avgCrownWidth = (6..10).map { rowWidth[it] }.average()
-        val avgMidWidth = (13..18).map { rowWidth[it] }.average() // ширина средней части
-        val avgWaistWidth = (18..22).map { rowWidth[it] }.average()
+        // Вспомогательная функция ширины фигуры на относительной высоте (0.0 = макушка, 1.0 = низ базы)
+        fun widthAt(relY: Float): Int {
+            val y = (topY + relY * (h - 1)).toInt().coerceIn(topY, bottomY)
+            return rowWidth[y]
+        }
 
-        // 1. ПЕШКА (Pawn): не бывает на 0-й и 7-й горизонтали; заметно ниже и уже остальных фигур
+        fun avgWidth(relStart: Float, relEnd: Float): Float {
+            val y1 = (topY + relStart * (h - 1)).toInt().coerceIn(topY, bottomY)
+            val y2 = (topY + relEnd * (h - 1)).toInt().coerceIn(y1, bottomY)
+            var sum = 0
+            var cnt = 0
+            for (y in y1..y2) {
+                sum += rowWidth[y]
+                cnt++
+            }
+            return if (cnt > 0) sum.toFloat() / cnt else 0f
+        }
+
+        val wTop = avgWidth(0.08f, 0.25f)      // верхняя шапка / зубцы / голова
+        val wUpperMid = avgWidth(0.28f, 0.48f) // плечи / тело
+        val wLowerMid = avgWidth(0.50f, 0.70f) // талия / шея
+        val wBase = avgWidth(0.75f, 0.92f)     // подставка
+
+        // 1. ПЕШКА (Pawn):
+        // В Duolingo пешка заметно ниже всех остальных фигур (topY >= 7..10, h <= 20) и имеет круглую голову (wTop 8..12),
+        // переходящую в узкую шею (wLowerMid <= wUpperMid) и компактную базу (wBase <= 16).
+        // У слона (Bishop) h >= 22..25 и широкое пузо (wUpperMid >= 14.5).
         if (row in 1..6) {
-            val isShort = topY >= 6 || upperBandFg <= 18
-            val isNarrowTop = crownWidth <= 13
-            val isSmallArea = totalFg <= 195
-            if ((isShort && isNarrowTop) || (isSmallArea && crownWidth <= 14 && upperBandFg <= 24)) {
+            val isPawnHeight = topY >= 7 && h <= 20
+            val isPawnArea = totalFg <= 215
+            val isNotBishopBelly = wUpperMid <= 13.8f && wBase <= 16.5f
+            if ((isPawnHeight && isNotBishopBelly) || (isPawnArea && topY >= 8 && wTop <= 12.2f && wUpperMid <= 13.2f)) {
                 return (if (isWhitePiece) 'P' else 'p') to -500
             }
         }
 
-        // 2. КОНЬ (Knight): единственная асимметричная фигура (морда слева, шея справа, под мордой слева пустота)
-        var neckLeft = 0
-        var neckRight = 0
-        for (gy in 15..22) {
-            for (gx in 5..14) if (fg[gy][gx]) neckLeft++
-            for (gx in 17..26) if (fg[gy][gx]) neckRight++
+        // 2. КОНЬ (Knight):
+        // У коня голова смотрит влево (в верхней половине левый край выступает влево),
+        // а под мордой слева (относительная высота 0.48..0.75) большой вырез фона, тогда как справа массивная спина/шея.
+        var leftLowerMass = 0
+        var rightLowerMass = 0
+        val midX = (minX + maxX) / 2
+        val yJawStart = (topY + h * 0.45f).toInt()
+        val yJawEnd = (topY + h * 0.74f).toInt()
+        for (y in yJawStart..yJawEnd) {
+            for (x in minX..maxX) {
+                if (fg[y][x]) {
+                    if (x < midX) leftLowerMass++ else rightLowerMass++
+                }
+            }
         }
-        var snoutLeft = 0
-        var snoutRight = 0
-        for (gy in 9..14) {
-            for (gx in 5..12) if (fg[gy][gx]) snoutLeft++
-            for (gx in 19..26) if (fg[gy][gx]) snoutRight++
-        }
-        val knightScore = (neckRight - neckLeft) * 2 + (snoutLeft - snoutRight)
-        if (knightScore >= 24 && neckRight >= neckLeft + 10) {
+        // На уровне 0.55..0.70 левая граница фигуры резко уходит вправо (под челюстью пустота)
+        val topLeftEdge = ((topY + h * 0.22f).toInt()..(topY + h * 0.40f).toInt()).minOfOrNull { rowLeft[it] } ?: minX
+        val jawLeftEdge = ((topY + h * 0.52f).toInt()..(topY + h * 0.68f).toInt()).maxOfOrNull { rowLeft[it] } ?: minX
+        val jawIndent = jawLeftEdge - topLeftEdge
+
+        if (rightLowerMass >= leftLowerMass + 12 && jawIndent >= 3) {
             return (if (isWhitePiece) 'N' else 'n') to -300
         }
 
-        // 3. Внутренние вырезы в верхней части (у ладьи овальное отверстие, у короля крест, у ферзя подушка короны)
-        var topCenterTip = 0 // gy in 2..5, gx in 13..18 (крест короля или шарик слона)
-        for (gy in 2..5) for (gx in 13..18) if (fg[gy][gx]) topCenterTip++
-
-        var innerCutout = 0 // тёмные пиксели внутри верхней части фигуры (gy in 5..11, gx in 11..20)
-        for (gy in 5..11) {
-            for (gx in 11..20) {
-                if (!fg[gy][gx] && rowLeft[gy] < gx - 1 && rowRight[gy] > gx + 1) {
-                    innerCutout++
+        // Считаем НАСТОЯЩИЕ тёмные отверстия цвета фона доски внутри контура фигуры
+        // (не путать с серо-синей заливкой чёрных фигур! Тёмная дырка имеет яркость фона <= bgLum + 10)
+        var topDarkHole = 0   // Овальная дыра сверху у Ладьи (relY 0.10..0.34)
+        var crossDarkHole = 0 // Тёмный крестик внутри Короля (relY 0.14..0.38)
+        val yHole1 = (topY + h * 0.10f).toInt()
+        val yHole2 = (topY + h * 0.36f).toInt()
+        for (y in yHole1..yHole2) {
+            val l = rowLeft[y]
+            val r = rowRight[y]
+            if (r - l >= 8) {
+                for (x in (l + 3)..(r - 3)) {
+                    val lum = lumGrid[y][x]
+                    if (lum in 0..(bgLum + 11)) {
+                        topDarkHole++
+                        if (x in (midX - 2)..(midX + 2)) crossDarkHole++
+                    }
                 }
             }
         }
 
-        var crossCutout = 0 // вырез креста короля (gy in 4..8, gx in 13..18)
-        for (gy in 4..8) {
-            for (gx in 13..18) {
-                if (!fg[gy][gx] && rowLeft[gy] <= 12 && rowRight[gy] >= 19) {
-                    crossCutout++
+        // Проверяем диагональную прорезь СЛОНА (Bishop) слева-сверху (relY 0.25..0.52)
+        var bishopNotch = 0
+        val yNotch1 = (topY + h * 0.24f).toInt()
+        val yNotch2 = (topY + h * 0.52f).toInt()
+        for (y in yNotch1..yNotch2) {
+            val l = rowLeft[y]
+            val r = rowRight[y]
+            if (r - l >= 8) {
+                // Прорезь у слона идёт с левой стороны внутрь купола
+                for (x in (l + 1)..min(r - 2, l + 6)) {
+                    if (!fg[y][x] && fg[y][min(N - 1, x + 3)]) {
+                        bishopNotch++
+                    }
                 }
             }
         }
 
-        // Оценка вероятности КОРОЛЯ (K)
+        // Оценка КОРОЛЯ (King):
+        // У короля на самом верху узкий крестик (ширина макушки 3..7 пикселей), под ним очень широкое сердцевидное тело (wUpperMid >= 17.5)
+        // и тёмный крест внутри верхней части.
+        val veryTopWidth = avgWidth(0.0f, 0.10f)
         var kScore = 0
-        if (topCenterTip >= 6) kScore += 30
-        if (crossCutout >= 4) kScore += 35
-        if (avgMidWidth >= 17.5) kScore += 25
-        if (crownWidth in 15..21) kScore += 15
-        if ((row == 0 || row == 7) && col == 4) kScore += 20 // бонус стартового поля e1/e8
+        if (veryTopWidth in 2.5f..8.5f && wUpperMid >= 16.5f) kScore += 35
+        if (crossDarkHole >= 3) kScore += 35
+        if (wUpperMid > wTop + 3.0f) kScore += 25
+        if (h >= 23) kScore += 15
+        if ((row == 0 || row == 7) && col == 4) kScore += 15
 
-        // 4. СЛОН (Bishop): узкий купол сверху, расширяющийся к середине + диагональная прорезь слева
-        var bishopSlit = 0
-        for (gy in 9..14) {
-            for (gx in 9..14) {
-                if (!fg[gy][gx] && fg[gy][min(28, gx + 4)]) bishopSlit++
-            }
-        }
-        if (avgCrownWidth <= avgMidWidth * 0.78 && crownWidth <= 15 && avgMidWidth >= 14.0) {
+        // 3. СЛОН (Bishop):
+        // Острая макушка-шарик сверху (wTop заметно уже пуза: wTop < wUpperMid - 2.5), круглое пузо (wUpperMid 14..18),
+        // плюс характерная прорезь слева (bishopNotch) и отсутствие широкого тёмного овала ладьи.
+        if (wTop <= wUpperMid - 2.2f && wUpperMid <= 18.2f && (bishopNotch >= 3 || veryTopWidth <= 6.5f) && kScore < 65) {
             return (if (isWhitePiece) 'B' else 'b') to kScore
         }
 
-        // 5. ЛАДЬЯ (Rook): плоский верх (мало пикселей на gy 2..4), прямые вертикальные стенки и овальное отверстие сверху
-        val flatTop = topCenterTip <= 5
-        val straightWalls = abs(avgCrownWidth - avgMidWidth) <= 2.6 && crownWidth in 14..19
-        if (flatTop && straightWalls && innerCutout >= 6) {
+        // 4. ЛАДЬЯ (Rook):
+        // Цилиндрическая башня: плоский широкий верх (veryTopWidth >= 10), ширина верха почти равна ширине середины и базы,
+        // а сверху внутри крыши крупный горизонтальный тёмный овал (topDarkHole >= 6).
+        val isTowerShape = wTop >= 13.0f && abs(wTop - wUpperMid) <= 2.5f && veryTopWidth >= 9.5f
+        if (isTowerShape && topDarkHole >= 5 && wUpperMid <= 19.0f) {
             return (if (isWhitePiece) 'R' else 'r') to kScore
         }
 
-        // 6. ФЕРЗЬ (Queen) vs КОРОЛЬ (King) vs ЛАДЬЯ/СЛОН:
-        // У ферзя самая широкая корона сверху (шире талии: avgCrownWidth >= avgWaistWidth)
-        if (crownWidth >= 19 && avgCrownWidth >= avgWaistWidth - 0.5 && crossCutout <= 5) {
-            return (if (isWhitePiece) 'Q' else 'q') to kScore
-        }
-
-        if (kScore >= 65) {
+        // 5. ФЕРЗЬ (Queen) vs КОРОЛЬ (King):
+        // У ферзя широкая корона с зубцами в верхней части (wTop >= 15.5, шире талии wLowerMid)
+        if (kScore >= 65 && wUpperMid > wTop + 2.0f) {
             return (if (isWhitePiece) 'K' else 'k') to kScore
         }
 
-        if (flatTop && crownWidth <= 18) {
+        if (wTop >= 15.0f && wTop >= wLowerMid + 1.2f) {
+            return (if (isWhitePiece) 'Q' else 'q') to kScore
+        }
+
+        if (kScore >= 55) {
+            return (if (isWhitePiece) 'K' else 'k') to kScore
+        }
+
+        if (isTowerShape) {
             return (if (isWhitePiece) 'R' else 'r') to kScore
         }
-        if (avgCrownWidth < avgMidWidth - 1.5 || bishopSlit >= 8) {
+
+        if (wTop < wUpperMid - 1.5f) {
             return (if (isWhitePiece) 'B' else 'b') to kScore
         }
 
         return (if (isWhitePiece) 'Q' else 'q') to kScore
+    }
+
+    private fun isOverlayColor(r: Int, g: Int, b: Int): Boolean {
+        // Ярко-зелёная стрелка или рамка
+        if (g > r + 35 && g > b + 20) return true
+        // Оранжево-жёлтый пунктир ответа (ponder move)
+        if (r > 170 && g in 100..210 && b < 90) return true
+        return false
     }
 
     private fun enforceSingleKing(board: Array<CharArray>, kingScore: Array<IntArray>, isWhite: Boolean) {
@@ -389,7 +442,7 @@ object BoardRecognizer {
             val best = coords.maxByOrNull { (r, c) -> kingScore[r][c] } ?: coords[0]
             for (pos in coords) {
                 if (pos != best) {
-                    board[pos.first][pos.second] = if (isWhite) 'Q' else 'q'
+                    board[pos.first][pos.second] = if (isWhite) 'R' else 'r'
                 }
             }
         }
