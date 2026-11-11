@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 6
 
     steps:
@@ -35,12 +35,3 @@ jobs:
           name: DuolingoChessBot-Debug
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
-
-      - name: Publish Latest Release APK
-        run: |
-          gh release delete latest -y --cleanup-tag || true
-          gh release create latest app/build/outputs/apk/debug/app-debug.apk \
-            --title "DuolingoChessBot Latest APK" \
-            --notes "Ready APK"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
