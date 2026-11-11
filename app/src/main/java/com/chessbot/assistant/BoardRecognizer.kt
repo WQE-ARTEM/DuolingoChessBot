@@ -21,7 +21,7 @@ object BoardRecognizer {
     )
 
     fun isFrameStable(prev: Bitmap?, curr: Bitmap, topPx: Int, sizePx: Int): Boolean {
-        return true // Мгновенный отклик без задержек анимации
+        return true
     }
 
     fun recognizeBoard(
@@ -34,7 +34,6 @@ object BoardRecognizer {
     ): ScanResult {
         val continueActive = detectContinueButton(bitmap)
         
-        // Если кнопка «Продолжить» активна или это новая задача — сбрасываем на классическую стартовую позицию
         if (continueActive && !lastContinueState) {
             cachedFen = if (whiteAtBottom) {
                 "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
@@ -44,7 +43,6 @@ object BoardRecognizer {
         }
         lastContinueState = continueActive
 
-        // Парсим текущий FEN в матрицу 8x8 для движка
         val board = Array(8) { CharArray(8) { '.' } }
         val fenParts = cachedFen.split(" ")[0].split("/")
         for (r in 0..7) {
@@ -58,23 +56,20 @@ object BoardRecognizer {
             }
         }
 
-        // Сканируем только наличие пешек и пустых клеток по светлым/темным пикселям
         val left = boardLeftPx.coerceIn(0, max(0, bitmap.width - 64))
         val top = boardTopPx.coerceIn(0, max(0, bitmap.height - 64))
         val size = min(boardSizePx, min(bitmap.width - left, bitmap.height - top))
         val cellSize = size / 8f
 
-        for (r in 0..7) {
+        // Точное сканирование центральных рядов (2, 3, 4, 5) без ложных срабатываний
+        for (r in 2..5) {
             for (c in 0..7) {
-                // Не трогаем задние ряды фигурок (0 и 7), они всегда стабильны по правилам задач
-                if (r == 0 || r == 7) continue
-                
-                val hasPawn = checkPawnAtCell(bitmap, left + c * cellSize, top + r * cellSize, cellSize)
-                if (hasPawn) {
-                    // Если в матрице здесь пусто или стояла другая пешка — обновляем
-                    if (board[r][c] == '.' || board[r][c].lowercaseChar() == 'p') {
-                        board[r][c] = if (r > 3) 'P' else 'p'
-                    }
+                val cellX = left + c * cellSize
+                val cellY = top + r * cellSize
+                val type = classifyCellColor(bitmap, cellX, cellY, cellSize)
+                if (type != '.') {
+                    board[r][c] = if (type == 'W') (if (board[r][c] == '.') 'P' else board[r][c]) 
+                                  else (if (board[r][c] == '.') 'p' else board[r][c])
                 }
             }
         }
@@ -86,29 +81,29 @@ object BoardRecognizer {
             board = board,
             fen = updatedFen,
             isValid = true,
-            statusNote = "Smart FEN OK",
+            statusNote = "Stable FEN OK",
             continueButtonActive = continueActive,
             detectedWhiteAtBottom = whiteAtBottom
         )
     }
 
-    private fun checkPawnAtCell(bmp: Bitmap, cellX: Float, cellY: Float, cellSize: Float): Boolean {
+    private fun classifyCellColor(bmp: Bitmap, cellX: Float, cellY: Float, cellSize: Float): Char {
         val N = 12
-        var piecePixels = 0
-        for (gy in 2 until N - 2) {
-            for (gx in 2 until N - 2) {
+        var whiteCount = 0
+        var blackCount = 0
+        for (gy in 3 until N - 3) {
+            for (gx in 3 until N - 3) {
                 val px = (cellX + (gx + 0.5f) * cellSize / N).toInt().coerceIn(0, bmp.width - 1)
                 val py = (cellY + (gy + 0.5f) * cellSize / N).toInt().coerceIn(0, bmp.height - 1)
                 val c = bmp.getPixel(px, py)
                 val r = Color.red(c); val g = Color.green(c); val b = Color.blue(c)
-                if (g > r + 30) continue // пропускаем зеленые стрелки
+                if (g > r + 30) continue
                 val lum = (r * 299 + g * 587 + b * 114) / 1000
-                if (lum >= 140 || (lum in 55..139 && b >= r)) {
-                    piecePixels++
-                }
+                if (lum >= 145) whiteCount++
+                else if (lum in 58..144 && b >= r) blackCount++
             }
         }
-        return piecePixels in 10..85 // Пешка занимает умеренную площадь
+        return if (whiteCount >= 18) 'W' else if (blackCount >= 18) 'B' else '.'
     }
 
     private fun detectContinueButton(bmp: Bitmap): Boolean {
