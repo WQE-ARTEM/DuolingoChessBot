@@ -354,6 +354,7 @@ class ChessOverlayService : Service() {
                         BoardRecognizer.recognizeBoard(frame, leftPx, topPx, sizePx, whiteBottom, lastAutoPlayedFen)
                     }
 
+                    overlay.whiteAtBottom = scan.detectedWhiteAtBottom
                     overlay.detectedBoard = scan.board
 
                     if (scan.continueButtonActive && autoPlayEnabled) {
