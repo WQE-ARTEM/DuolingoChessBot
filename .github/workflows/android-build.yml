@@ -5,18 +5,17 @@ on:
     branches: [ "main", "master" ]
   workflow_dispatch:
 
-permissions:
-  contents: write
-
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+concurrency:
+  group: android-build-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 8
 
     steps:
-      - name: Checkout Source Code
+      - name: Checkout Code
         uses: actions/checkout@v4
 
       - name: Set up JDK 17
@@ -24,24 +23,16 @@ jobs:
         with:
           java-version: '17'
           distribution: 'temurin'
+          cache: 'gradle'
 
-      - name: Install Gradle
-        run: sudo apt-get update && sudo apt-get install -y gradle
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
 
       - name: Build APK Directly
-        run: ./gradlew assembleDebug --no-daemon
+        run: ./gradlew assembleDebug --no-daemon --parallel --build-cache
 
-      - name: Upload APK Artifact
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: DuolingoChessBot-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
-
-      - name: Publish APK to GitHub Releases
-        uses: softprops/action-gh-release@v2
-        if: success()
-        with:
-          tag_name: v1.0.${{ github.run_number }}
-          name: "DuolingoChessBot 4300+ ELO v1.0.${{ github.run_number }}"
-          files: app/build/outputs/apk/debug/app-debug.apk
-          generate_release_notes: true
+          name: DuolingoChessBot-Debug
+          path: app/build/outputs/apk/debug/*.apk
