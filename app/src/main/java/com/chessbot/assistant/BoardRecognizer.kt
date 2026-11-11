@@ -8,8 +8,19 @@ import kotlin.math.min
 
 object BoardRecognizer {
 
-    private var cachedFen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+    // Полная матрица состояния доски по памяти (начиная со стандартной расстановки)
+    private var boardState = arrayOf(
+        charArrayOf('r', 'n', 'b', 'q', 'k', 'b', 'n', 'r'),
+        charArrayOf('p', 'p', 'p', 'p', 'p', 'p', 'p', 'p'),
+        charArrayOf('.', '.', '.', '.', '.', '.', '.', '.'),
+        charArrayOf('.', '.', '.', '.', '.', '.', '.', '.'),
+        charArrayOf('.', '.', '.', '.', '.', '.', '.', '.'),
+        charArrayOf('.', '.', '.', '.', '.', '.', '.', '.'),
+        charArrayOf('P', 'P', 'P', 'P', 'P', 'P', 'P', 'P'),
+        charArrayOf('R', 'N', 'B', 'Q', 'K', 'B', 'N', 'R')
+    )
     private var lastContinueState = false
+    private var initialized = false
 
     data class ScanResult(
         val board: Array<CharArray>,
@@ -33,77 +44,95 @@ object BoardRecognizer {
         lockedFenState: String = ""
     ): ScanResult {
         val continueActive = detectContinueButton(bitmap)
-        
-        if (continueActive && !lastContinueState) {
-            cachedFen = if (whiteAtBottom) {
-                "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
-            } else {
-                "RNBQKBNR/PPPPPPPP/8/8/8/8/pppppppp/rnbqkbnr b KQkq - 0 1"
-            }
+
+        // Если появилась кнопка продолжения или это старт — сбрасываем доску в исходную позицию
+        if (continueActive && !lastContinueState || !initialized) {
+            boardState = arrayOf(
+                charArrayOf('r', 'n', 'b', 'q', 'k', 'b', 'n', 'r'),
+                charArrayOf('p', 'p', 'p', 'p', 'p', 'p', 'p', 'p'),
+                charArrayOf('.', '.', '.', '.', '.', '.', '.', '.'),
+                charArrayOf('.', '.', '.', '.', '.', '.', '.', '.'),
+                charArrayOf('.', '.', '.', '.', '.', '.', '.', '.'),
+                charArrayOf('.', '.', '.', '.', '.', '.', '.', '.'),
+                charArrayOf('P', 'P', 'P', 'P', 'P', 'P', 'P', 'P'),
+                charArrayOf('R', 'N', 'B', 'Q', 'K', 'B', 'N', 'R')
+            )
+            initialized = true
         }
         lastContinueState = continueActive
-
-        val board = Array(8) { CharArray(8) { '.' } }
-        val fenParts = cachedFen.split(" ")[0].split("/")
-        for (r in 0..7) {
-            var c = 0
-            for (ch in fenParts[r]) {
-                if (ch.isDigit()) {
-                    c += ch.digitToInt()
-                } else if (c < 8) {
-                    board[r][c++] = ch
-                }
-            }
-        }
 
         val left = boardLeftPx.coerceIn(0, max(0, bitmap.width - 64))
         val top = boardTopPx.coerceIn(0, max(0, bitmap.height - 64))
         val size = min(boardSizePx, min(bitmap.width - left, bitmap.height - top))
         val cellSize = size / 8f
 
-        // Точное сканирование центральных рядов (2, 3, 4, 5) без ложных срабатываний
-        for (r in 2..5) {
-            for (c in 0..7) {
-                val cellX = left + c * cellSize
-                val cellY = top + r * cellSize
-                val type = classifyCellColor(bitmap, cellX, cellY, cellSize)
-                if (type != '.') {
-                    board[r][c] = if (type == 'W') (if (board[r][c] == '.') 'P' else board[r][c]) 
-                                  else (if (board[r][c] == '.') 'p' else board[r][c])
-                }
-            }
-        }
+        // Сканируем поле по памяти: ищем, где исчезла фигура и куда она переместилась
+        trackPieceMovements(bitmap, left, top, cellSize)
 
-        val updatedFen = buildFen(board, whiteAtBottom)
-        cachedFen = updatedFen
+        val fen = buildFen(boardState, whiteAtBottom)
 
         return ScanResult(
-            board = board,
-            fen = updatedFen,
+            board = boardState,
+            fen = fen,
             isValid = true,
-            statusNote = "Stable FEN OK",
+            statusNote = "Memory Tracker OK",
             continueButtonActive = continueActive,
             detectedWhiteAtBottom = whiteAtBottom
         )
     }
 
-    private fun classifyCellColor(bmp: Bitmap, cellX: Float, cellY: Float, cellSize: Float): Char {
-        val N = 12
-        var whiteCount = 0
-        var blackCount = 0
-        for (gy in 3 until N - 3) {
-            for (gx in 3 until N - 3) {
+    private fun trackPieceMovements(bmp: Bitmap, left: Int, top: Int, cellSize: Float) {
+        // Проверяем каждую клетку доски: есть ли на ней реальный объект (фигура/пешка)
+        val currentPresence = Array(8) { r ->
+            BooleanArray(8) { c ->
+                val cellX = left + c * cellSize
+                val cellY = top + r * cellSize
+                hasVisualObject(bmp, cellX, cellY, cellSize)
+            }
+        }
+
+        // Ищем клетку, которая опустела, и клетку, которая заполнилась
+        var emptyFrom: Pair<Int, Int>? = null
+        var filledTo: Pair<Int, Int>? = null
+
+        for (r in 0..7) {
+            for (c in 0..7) {
+                val hadPiece = boardState[r][c] != '.'
+                val hasVisual = currentPresence[r][c]
+
+                if (hadPiece && !hasVisual) {
+                    emptyFrom = r to c
+                } else if (!hadPiece && hasVisual) {
+                    filledTo = r to c
+                }
+            }
+        }
+
+        // Если зафиксировано перемещение (кто-то ушел и кто-то пришел)
+        if (emptyFrom != null && filledTo != null) {
+            val piece = boardState[emptyFrom.first][emptyFrom.second]
+            boardState[emptyFrom.first][emptyFrom.second] = '.'
+            boardState[filledTo.first][filledTo.second] = piece
+        }
+    }
+
+    private fun hasVisualObject(bmp: Bitmap, cellX: Float, cellY: Float, cellSize: Float): Boolean {
+        val N = 10
+        var pixels = 0
+        for (gy in 2 until N - 2) {
+            for (gx in 2 until N - 2) {
                 val px = (cellX + (gx + 0.5f) * cellSize / N).toInt().coerceIn(0, bmp.width - 1)
                 val py = (cellY + (gy + 0.5f) * cellSize / N).toInt().coerceIn(0, bmp.height - 1)
                 val c = bmp.getPixel(px, py)
                 val r = Color.red(c); val g = Color.green(c); val b = Color.blue(c)
-                if (g > r + 30) continue
+                if (g > r + 30) continue // зелёная стрелка
                 val lum = (r * 299 + g * 587 + b * 114) / 1000
-                if (lum >= 145) whiteCount++
-                else if (lum in 58..144 && b >= r) blackCount++
+                if (lum >= 135 || (lum in 50..134 && b >= r)) {
+                    pixels++
+                }
             }
         }
-        return if (whiteCount >= 18) 'W' else if (blackCount >= 18) 'B' else '.'
+        return pixels >= 8 // Если на клетке есть хотя бы немного пикселей фигуры
     }
 
     private fun detectContinueButton(bmp: Bitmap): Boolean {
