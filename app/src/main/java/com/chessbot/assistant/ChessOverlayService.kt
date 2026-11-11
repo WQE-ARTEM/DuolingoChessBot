@@ -29,16 +29,7 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.core.app.NotificationCompat
-import kotlinx.coroutines.CoroutineExceptionHandler
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.*
 import kotlin.math.min
 
 class ChessOverlayService : Service() {
@@ -52,14 +43,10 @@ class ChessOverlayService : Service() {
     private var virtualDisplay: VirtualDisplay? = null
     private var imageReader: ImageReader? = null
     private lateinit var chessEngine: ChessEngine
+    private lateinit var autoMoveService: AutoMoveService
 
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val errorHandler = CoroutineExceptionHandler { _, throwable ->
-        mainHandler.post {
-            statusText?.text = "⚠️ Ошибка цикла: ${throwable.javaClass.simpleName}"
-        }
-    }
-    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main + errorHandler)
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var scanJob: Job? = null
 
     private var screenWidth = 1080
@@ -67,16 +54,24 @@ class ChessOverlayService : Service() {
     private var screenDensity = 420
 
     private var autoPlayEnabled = false
-    private var isExecutingMove = false
-    private var lastAutoPlayedFen = ""
-    private var previousFrameBitmap: Bitmap? = null
+    private var isManualEditing = false
+    private var selectedCellForMove: Pair<Int, Int>? = null
 
-    // Обязательный колбэк для Android 14 (API 34), без которого приложение падает
+    // Внутренняя доска бота для ручной расстановки и трекинга (чёрные снизу по умолчанию)
+    private var internalBoard = arrayOf(
+        charArrayOf('R', 'N', 'B', 'K', 'Q', 'B', 'N', 'R'),
+        charArrayOf('P', 'P', 'P', 'P', 'P', 'P', 'P', 'P'),
+        charArrayOf('.', '.', '.', '.', '.', '.', '.', '.'),
+        charArrayOf('.', '.', '.', '.', '.', '.', '.', '.'),
+        charArrayOf('.', '.', '.', '.', '.', '.', '.', '.'),
+        charArrayOf('.', '.', '.', '.', '.', '.', '.', '.'),
+        charArrayOf('p', 'p', 'p', 'p', 'p', 'p', 'p', 'p'),
+        charArrayOf('r', 'n', 'b', 'k', 'q', 'b', 'n', 'r')
+    )
+
     private val projectionCallback = object : MediaProjection.Callback() {
         override fun onStop() {
-            mainHandler.post {
-                stopCaptureResources()
-            }
+            mainHandler.post { stopCaptureResources() }
         }
     }
 
@@ -90,62 +85,45 @@ class ChessOverlayService : Service() {
         screenDensity = metrics.densityDpi
 
         chessEngine = ChessEngine(this)
+        autoMoveService = AutoMoveService()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         try {
             startForegroundWithNotification()
-
             if (Settings.canDrawOverlays(this) && boardOverlay == null) {
                 setupOverlays()
             }
 
-            val resultCode = intent?.getIntExtra("RESULT_CODE", Activity.RESULT_CANCELED)
-                ?: Activity.RESULT_CANCELED
+            val resultCode = intent?.getIntExtra("RESULT_CODE", Activity.RESULT_CANCELED) ?: Activity.RESULT_CANCELED
             val data: Intent? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 intent?.getParcelableExtra("DATA_INTENT", Intent::class.java)
             } else {
-                @Suppress("DEPRECATION")
-                intent?.getParcelableExtra("DATA_INTENT")
+                @Suppress("DEPRECATION") intent?.getParcelableExtra("DATA_INTENT")
             }
 
             if (resultCode == Activity.RESULT_OK && data != null) {
                 val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
                 mediaProjection = mpManager.getMediaProjection(resultCode, data)
-
-                // КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ ДЛЯ ANDROID 14 (API 34):
-                // Регистрация колбэка строго ДО вызова createVirtualDisplay
                 mediaProjection?.registerCallback(projectionCallback, mainHandler)
-
                 setupVirtualDisplay()
-                startScanningLoop()
-            } else {
-                statusText?.text = "⚠️ Нет доступа к захвату экрана"
+                startEngineLoop()
             }
-        } catch (t: Throwable) {
-            statusText?.text = "⚠️ Ошибка запуска: ${t.message}"
-        }
-
+        } catch (_: Throwable) {}
         return START_NOT_STICKY
     }
 
     private fun startForegroundWithNotification() {
         val channelId = "chessbot_overlay_channel"
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        val channel = NotificationChannel(
-            channelId,
-            "ChessBot Service",
-            NotificationManager.IMPORTANCE_LOW
-        )
+        val channel = NotificationChannel(channelId, "ChessBot", NotificationManager.IMPORTANCE_LOW)
         nm.createNotificationChannel(channel)
-
-        val notification: Notification = NotificationCompat.Builder(this, channelId)
-            .setContentTitle("Duolingo Chess Bot активен")
-            .setContentText("Анализ доски и визуализация ходов в реальном времени")
+        val notification = NotificationCompat.Builder(this, channelId)
+            .setContentTitle("Chess Bot Активен")
+            .setContentText("Интерактивная доска и Stockfish")
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setOngoing(true)
             .build()
-
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(101, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
         } else {
@@ -156,338 +134,263 @@ class ChessOverlayService : Service() {
     private fun setupOverlays() {
         val overlayView = BoardOverlayView(this).apply {
             boardLeftPx = 0f
-            boardTopPx = screenHeight * 0.352f
+            boardTopPx = screenHeight * 0.35f
             boardSizePx = screenWidth.toFloat()
+            whiteAtBottom = false
+            detectedBoard = internalBoard
+
+            onSquareSelectedListener = { f, r ->
+                handleManualSquareClick(f, r)
+            }
         }
         boardOverlay = overlayView
 
-        val boardParams = WindowManager.LayoutParams(
+        val overlayParams = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY else WindowManager.LayoutParams.TYPE_PHONE,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
             PixelFormat.TRANSLUCENT
-        )
-        windowManager.addView(overlayView, boardParams)
+        ).apply { gravity = Gravity.TOP or Gravity.START }
 
-        val panelParams = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
-            PixelFormat.TRANSLUCENT
-        ).apply {
-            gravity = Gravity.TOP or Gravity.START
-            x = 20
-            y = (screenHeight * 0.08f).toInt()
-        }
+        windowManager.addView(overlayView, overlayParams)
 
+        // Панель управления с кнопками
         val panel = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.argb(230, 22, 32, 38))
-            setPadding(20, 14, 20, 14)
+            orientation = LinearLayout.HORIZONTAL
+            setBackgroundColor(Color.argb(230, 25, 35, 40))
+            setPadding(12, 8, 12, 8)
+            gravity = Gravity.CENTER
         }
         controlPanel = panel
 
-        val stText = TextView(this).apply {
-            text = "♟️ ChessBot готов | Перетащите панель"
+        statusText = TextView(this).apply {
+            text = "Готов. Сделай 1-й ход"
             setTextColor(Color.WHITE)
-            textSize = 12f
+            textSize = 13f
+            setPadding(8, 0, 16, 0)
         }
-        statusText = stText
-        panel.addView(stText)
 
-        val row1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val btnManual = Button(this).apply {
+            text = "✋ Ручн."
+            textSize = 12f
+            setPadding(12, 4, 12, 4)
+            setOnClickListener {
+                isManualEditing = !isManualEditing
+                boardOverlay?.isManualMode = isManualEditing
+                text = if (isManualEditing) "✏️ Ред." else "✋ Ручн."
+                statusText?.text = if (isManualEditing) "Режим расстановки: тапни откуда и куда" else "Режим игры"
+                boardOverlay?.invalidate()
+            }
+        }
 
-        val btnAuto = createCompactButton("🤖 Авто: ВЫКЛ").apply {
+        val btnReset = Button(this).apply {
+            text = "🔄 Сброс"
+            textSize = 12f
+            setPadding(12, 4, 12, 4)
+            setOnClickListener {
+                internalBoard = arrayOf(
+                    charArrayOf('R', 'N', 'B', 'K', 'Q', 'B', 'N', 'R'),
+                    charArrayOf('P', 'P', 'P', 'P', 'P', 'P', 'P', 'P'),
+                    charArrayOf('.', '.', '.', '.', '.', '.', '.', '.'),
+                    charArrayOf('.', '.', '.', '.', '.', '.', '.', '.'),
+                    charArrayOf('.', '.', '.', '.', '.', '.', '.', '.'),
+                    charArrayOf('.', '.', '.', '.', '.', '.', '.', '.'),
+                    charArrayOf('p', 'p', 'p', 'p', 'p', 'p', 'p', 'p'),
+                    charArrayOf('r', 'n', 'b', 'k', 'q', 'b', 'n', 'r')
+                )
+                boardOverlay?.detectedBoard = internalBoard
+                boardOverlay?.bestMoveUci = null
+                boardOverlay?.invalidate()
+                statusText?.text = "Доска сброшена. Сходи первый!"
+            }
+        }
+
+        val btnAuto = Button(this).apply {
+            text = "Авто: ВЫКЛ"
+            textSize = 12f
+            setPadding(12, 4, 12, 4)
             setOnClickListener {
                 autoPlayEnabled = !autoPlayEnabled
-                text = if (autoPlayEnabled) "🤖 Авто: ВКЛ" else "🤖 Авто: ВЫКЛ"
-                setBackgroundColor(if (autoPlayEnabled) Color.rgb(40, 140, 60) else Color.rgb(55, 70, 80))
+                text = if (autoPlayEnabled) "Авто: ВКЛ" else "Авто: ВЫКЛ"
             }
         }
 
-        val btnOneMove = createCompactButton("⚡ 1 Ход").apply {
-            setOnClickListener {
-                val move = boardOverlay?.bestMoveUci
-                if (!move.isNullOrEmpty() && !isExecutingMove) {
-                    executeAutoMove(move)
-                }
-            }
-        }
+        panel.addView(statusText)
+        panel.addView(btnManual)
+        panel.addView(btnReset)
+        panel.addView(btnAuto)
 
-        val btnSide = createCompactButton("🔄 Белые").apply {
-            setOnClickListener {
-                val current = boardOverlay ?: return@setOnClickListener
-                current.whiteAtBottom = !current.whiteAtBottom
-                text = if (current.whiteAtBottom) "🔄 Белые" else "🔄 Черные"
-                lastAutoPlayedFen = ""
-                current.invalidate()
-            }
-        }
-
-        val btnClose = createCompactButton("✖").apply {
-            setBackgroundColor(Color.rgb(150, 45, 45))
-            setOnClickListener { stopSelf() }
-        }
-
-        row1.addView(btnAuto)
-        row1.addView(btnOneMove)
-        row1.addView(btnSide)
-        row1.addView(btnClose)
-        panel.addView(row1)
-
-        val row2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-
-        val btnGrid = createCompactButton("🎯 Сетка").apply {
-            setOnClickListener {
-                val current = boardOverlay ?: return@setOnClickListener
-                current.showCalibrationGrid = !current.showCalibrationGrid
-                current.invalidate()
-            }
-        }
-        val btnUp = createCompactButton("▲ Y-").apply {
-            setOnClickListener {
-                val current = boardOverlay ?: return@setOnClickListener
-                current.boardTopPx -= 12f
-                current.invalidate()
-            }
-        }
-        val btnDown = createCompactButton("▼ Y+").apply {
-            setOnClickListener {
-                val current = boardOverlay ?: return@setOnClickListener
-                current.boardTopPx += 12f
-                current.invalidate()
-            }
-        }
-
-        row2.addView(btnGrid)
-        row2.addView(btnUp)
-        row2.addView(btnDown)
-        panel.addView(row2)
-
-        var initX = 0; var initY = 0; var touchX = 0f; var touchY = 0f
-        stText.setOnTouchListener { _, event ->
-            when (event.action) {
-                MotionEvent.ACTION_DOWN -> {
-                    initX = panelParams.x; initY = panelParams.y
-                    touchX = event.rawX; touchY = event.rawY
-                    true
-                }
-                MotionEvent.ACTION_MOVE -> {
-                    panelParams.x = initX + (event.rawX - touchX).toInt()
-                    panelParams.y = initY + (event.rawY - touchY).toInt()
-                    windowManager.updateViewLayout(panel, panelParams)
-                    true
-                }
-                else -> false
-            }
-        }
+        val panelParams = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY else WindowManager.LayoutParams.TYPE_PHONE,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT
+        ).apply { gravity = Gravity.TOP or Gravity.START; y = 100 }
 
         windowManager.addView(panel, panelParams)
     }
 
-    private fun createCompactButton(label: String): Button {
-        return Button(this).apply {
-            text = label
-            textSize = 10.5f
-            setTextColor(Color.WHITE)
-            setBackgroundColor(Color.rgb(55, 70, 80))
-            setPadding(14, 6, 14, 6)
-            minHeight = 0
-            minimumHeight = 0
-            minWidth = 0
-            minimumWidth = 0
+    private fun handleManualSquareClick(file: Int, rank: Int) {
+        val r = 7 - rank
+        val c = file
+
+        if (selectedSquareForMove == null) {
+            if (internalBoard[r][c] != '.') {
+                selectedSquareForMove = r to c
+                boardOverlay?.selectedSquare = Pair(file, rank)
+                boardOverlay?.invalidate()
+                statusText?.text = "Выбрано $file$rank. Куда пойти?"
+            }
+        } else {
+            val (fromR, fromC) = selectedSquareForMove!!
+            val piece = internalBoard[fromR][fromC]
+            internalBoard[fromR][fromC] = '.'
+            internalBoard[r][c] = piece
+            selectedSquareForMove = null
+            boardOverlay?.selectedSquare = null
+            boardOverlay?.detectedBoard = internalBoard
+            boardOverlay?.invalidate()
+
+            // Дублируем этот ход на игровой доске Duolingo автоматически!
+            val fromFileChar = ('a' + fromC)
+            val fromRankChar = ('1' + (7 - fromR))
+            val toFileChar = ('a' + c)
+            val toRankChar = ('1' + (7 - r))
+            val uci = "$fromFileChar$fromRankChar$toFileChar$toRankChar"
+
+            statusText?.text = "Ход $uci сделан. Дублирую в игру..."
+            serviceScope.launch {
+                val left = boardOverlay?.boardLeftPx ?: 0f
+                val top = boardOverlay?.boardTopPx ?: 0f
+                val size = boardOverlay?.boardSizePx ?: screenWidth.toFloat()
+                
+                // Временно разрешаем клики сквозь сервис для отправки жеста в Duolingo
+                setAutoClickable(false)
+                autoMoveService.performChessMove(uci, left, top, size, whiteAtBottom = false) {
+                    setAutoClickable(true)
+                    statusText?.text = "⏳ Жду ответ соперника..."
+                    // Запускаем Stockfish для поиска ответа
+                    calculateBestMove()
+                }
+            }
         }
+    }
+
+    private var selectedSquareForMove: Pair<Int, Int>? = null
+
+    private fun setAutoClickable(clickable: Boolean) {
+        val params = controlPanel?.layoutParams as? WindowManager.LayoutParams ?: return
+        if (clickable) {
+            params.flags = params.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+        } else {
+            params.flags = params.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv()
+        }
+        windowManager.updateViewLayout(controlPanel, params)
+    }
+
+    private fun calculateBestMove() {
+        serviceScope.launch(Dispatchers.Default) {
+            val fen = buildFen(internalBoard, whiteAtBottom = false)
+            val result = chessEngine.findBestMove(fen, movetimeMs = 500)
+            withContext(Dispatchers.Main) {
+                if (result != null) {
+                    boardOverlay?.bestMoveUci = result.bestMove
+                    boardOverlay?.evalScoreCp = result.evalCp
+                    boardOverlay?.invalidate()
+                    statusText?.text = "Оценка: ${result.evalCp} cp. Ход: ${result.bestMove}"
+
+                    if (autoPlayEnabled && result.bestMove.length >= 4) {
+                        // Автоматически ходим за бота
+                        executeBotMove(result.bestMove)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun executeBotMove(uci: String) {
+        val fromFile = uci[0] - 'a'
+        val fromRank = uci[1] - '1'
+        val toFile = uci[2] - 'a'
+        val toRank = uci[3] - '1'
+
+        val fromR = 7 - fromRank
+        val fromC = fromFile
+        val toR = 7 - toRank
+        val toC = toFile
+
+        val piece = internalBoard[fromR][fromC]
+        internalBoard[fromR][fromC] = '.'
+        internalBoard[toR][toC] = piece
+        boardOverlay?.detectedBoard = internalBoard
+        boardOverlay?.bestMoveUci = null
+        boardOverlay?.invalidate()
+
+        serviceScope.launch {
+            val left = boardOverlay?.boardLeftPx ?: 0f
+            val top = boardOverlay?.boardTopPx ?: 0f
+            val size = boardOverlay?.boardSizePx ?: screenWidth.toFloat()
+
+            setAutoClickable(false)
+            autoMoveService.performChessMove(uci, left, top, size, whiteAtBottom = false) {
+                setAutoClickable(true)
+                statusText?.text = "Твой ход! Сдвинь фигуру на доске."
+            }
+        }
+    }
+
+    private fun buildFen(board: Array<CharArray>, whiteAtBottom: Boolean): String {
+        val sb = StringBuilder()
+        val rows = (7 downTo 0)
+        val cols = (7 downTo 0)
+        var firstRow = true
+        for (r in rows) {
+            if (!firstRow) sb.append('/')
+            firstRow = false
+            var empty = 0
+            for (c in cols) {
+                val p = board[r][c]
+                if (p == '.') empty++
+                else {
+                    if (empty > 0) { sb.append(empty); empty = 0 }
+                    sb.append(p)
+                }
+            }
+            if (empty > 0) sb.append(empty)
+        }
+        sb.append(" b KQkq - 0 1")
+        return sb.toString()
     }
 
     private fun setupVirtualDisplay() {
         imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
         virtualDisplay = mediaProjection?.createVirtualDisplay(
-            "ChessBotCapture",
-            screenWidth,
-            screenHeight,
-            screenDensity,
+            "ChessBotScreen",
+            screenWidth, screenHeight, screenDensity,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            imageReader?.surface,
-            null,
-            mainHandler
+            imageReader?.surface, null, null
         )
     }
 
-    private fun startScanningLoop() {
-        scanJob?.cancel()
-        scanJob = serviceScope.launch {
-            delay(400)
-            while (isActive) {
-                val overlay = boardOverlay
-                if (overlay == null || isExecutingMove) {
-                    delay(350)
-                    continue
-                }
-
-                overlay.visibility = View.INVISIBLE
-                delay(70)
-
-                val frame = captureScreenBitmap()
-
-                overlay.visibility = View.VISIBLE
-
-                if (frame != null) {
-                    val topPx = overlay.boardTopPx.toInt().coerceIn(0, frame.height - 100)
-                    val sizePx = min(overlay.boardSizePx.toInt(), frame.height - topPx)
-                    val leftPx = overlay.boardLeftPx.toInt().coerceIn(0, frame.width - 100)
-                    val whiteBottom = overlay.whiteAtBottom
-
-                    val stable = BoardRecognizer.isFrameStable(previousFrameBitmap, frame, topPx, sizePx)
-                    previousFrameBitmap = frame
-
-                    if (!stable) {
-                        statusText?.text = "⏳ Ожидание завершения анимации..."
-                        delay(260)
-                        continue
-                    }
-
-                    val scan = withContext(Dispatchers.Default) {
-                        BoardRecognizer.recognizeBoard(frame, leftPx, topPx, sizePx, whiteBottom, lastAutoPlayedFen)
-                    }
-
-                    overlay.whiteAtBottom = scan.detectedWhiteAtBottom
-                    overlay.detectedBoard = scan.board
-
-                    if (scan.continueButtonActive && autoPlayEnabled) {
-                        statusText?.text = "✅ Задача решена! Нажимаем ПРОДОЛЖИТЬ..."
-                        isExecutingMove = true
-                        overlay.visibility = View.INVISIBLE
-                        AutoMoveService.instance?.tapContinueButton(screenWidth, screenHeight) {
-                            overlay.visibility = View.VISIBLE
-                            isExecutingMove = false
-                            lastAutoPlayedFen = ""
-                        }
-                        delay(700)
-                        continue
-                    }
-
-                    if (scan.isValid) {
-                        val analysis = withContext(Dispatchers.Default) {
-                            chessEngine.analyzePosition(scan.fen, 900)
-                        }
-                        overlay.bestMoveUci = analysis.bestMoveUci
-                        overlay.ponderMoveUci = analysis.ponderMoveUci
-                        overlay.evalScoreCp = analysis.evalScoreCp
-                        overlay.invalidate()
-
-                        val evalFormatted = String.format("%+.1f", analysis.evalScoreCp / 100f)
-                        statusText?.text = "♟️ Ход: ${analysis.bestMoveUci} ($evalFormatted) | ${analysis.engineName}"
-
-                        if (autoPlayEnabled && scan.fen != lastAutoPlayedFen) {
-                            lastAutoPlayedFen = scan.fen
-                            executeAutoMove(analysis.bestMoveUci)
-                        }
-                    } else {
-                        statusText?.text = "🔍 ${scan.statusNote}"
-                        overlay.invalidate()
-                    }
-                }
-
-                delay(650)
-            }
-        }
-    }
-
-    private fun executeAutoMove(uciMove: String) {
-        val overlay = boardOverlay ?: return
-        val accService = AutoMoveService.instance
-        if (accService == null) {
-            statusText?.text = "⚠️ Включите Accessibility (ChessBot Auto-Mover)!"
-            return
-        }
-
-        isExecutingMove = true
-        overlay.visibility = View.GONE
-
-        accService.performChessMove(
-            uciMove = uciMove,
-            boardLeft = overlay.boardLeftPx,
-            boardTop = overlay.boardTopPx,
-            boardSize = overlay.boardSizePx,
-            whiteAtBottom = overlay.whiteAtBottom
-        ) {
-            overlay.visibility = View.VISIBLE
-            isExecutingMove = false
-        }
-    }
-
-    /**
-     * Безопасное чтение кадра из ImageReader с защитой от BufferUnderflowException
-     * при наличии аппаратного отступа строк (rowPadding).
-     */
-    private fun captureScreenBitmap(): Bitmap? {
-        val reader = imageReader ?: return null
-        val image = try {
-            reader.acquireLatestImage()
-        } catch (_: Throwable) {
-            null
-        } ?: return null
-
-        return try {
-            val plane = image.planes[0]
-            val buffer = plane.buffer
-            buffer.rewind()
-
-            val pixelStride = plane.pixelStride
-            val rowStride = plane.rowStride
-            val rowPadding = rowStride - pixelStride * screenWidth
-            val strideWidth = screenWidth + rowPadding / pixelStride
-
-            // Вычисляем безопасную высоту по реальному объему буфера, чтобы избежать BufferUnderflowException
-            val availableRows = buffer.remaining() / rowStride
-            val safeHeight = min(screenHeight, availableRows)
-            if (safeHeight <= 0 || strideWidth <= 0) return null
-
-            val rawBitmap = Bitmap.createBitmap(strideWidth, safeHeight, Bitmap.Config.ARGB_8888)
-            rawBitmap.copyPixelsFromBuffer(buffer)
-
-            if (strideWidth == screenWidth && safeHeight == screenHeight) {
-                rawBitmap
-            } else {
-                val cropped = Bitmap.createBitmap(rawBitmap, 0, 0, screenWidth, safeHeight)
-                rawBitmap.recycle()
-                cropped
-            }
-        } catch (t: Throwable) {
-            null
-        } finally {
-            try {
-                image.close()
-            } catch (_: Throwable) {}
-        }
+    private fun startEngineLoop() {
+        // Фоновый цикл ожидания
     }
 
     private fun stopCaptureResources() {
-        scanJob?.cancel()
-        try { virtualDisplay?.release() } catch (_: Throwable) {}
-        try { imageReader?.close() } catch (_: Throwable) {}
-        virtualDisplay = null
-        imageReader = null
+        virtualDisplay?.release()
+        imageReader?.close()
+        mediaProjection?.stop()
     }
 
     override fun onDestroy() {
+        scanJob?.cancel()
         stopCaptureResources()
-        serviceScope.cancel()
-        chessEngine.close()
-        try {
-            mediaProjection?.unregisterCallback(projectionCallback)
-            mediaProjection?.stop()
-        } catch (_: Throwable) {}
-        try {
-            boardOverlay?.let { windowManager.removeView(it) }
-            controlPanel?.let { windowManager.removeView(it) }
-        } catch (_: Throwable) {}
+        boardOverlay?.let { windowManager.removeView(it) }
+        controlPanel?.let { windowManager.removeView(it) }
         super.onDestroy()
     }
 
-    override fun onBind(intent: Intent?): IBinder? = null
+    override fun onBind(intent: Intent?): Intent? = null
 }
