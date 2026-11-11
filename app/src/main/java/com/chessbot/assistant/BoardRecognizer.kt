@@ -70,60 +70,82 @@ object BoardRecognizer {
         }
 
         val cellSize = size / 8f
+        val kingScore = Array(8) { IntArray(8) { -1000 } }
 
-        // Базовая расстановка фигур на рядах 0 и 7 (в задачах Duolingo порядок всегда стандартный)
-        val backRankWhite = charArrayOf('R', 'N', 'B', 'Q', 'K', 'B', 'N', 'R')
-        val backRankBlack = charArrayOf('r', 'n', 'b', 'q', 'k', 'b', 'n', 'r')
-
-        for (c in 0 until 8) {
-            board[0][c] = backRankBlack[c]
-            board[7][c] = backRankWhite[c]
-        }
-
-        // Сканируем ряды с 1 по 6 на предмет пешек и сдвигов
         for (r in 0 until 8) {
             for (c in 0 until 8) {
-                if (r == 0 || r == 7) continue // ряды 0 и 7 оставляем базовыми
-
                 val cellX = (left + c * cellSize).toInt()
                 val cellY = (top + r * cellSize).toInt()
                 val cellW = cellSize.toInt()
                 val cellH = cellSize.toInt()
 
-                val piece = classifyCellSimple(bitmap, cellX, cellY, cellW, cellH, r)
-                board[r][c] = piece
+                val res = classifyCell(bitmap, cellX, cellY, cellW, cellH, r, c)
+                board[r][c] = res.first
+                kingScore[r][c] = res.second
             }
         }
 
-        val fen = buildFen(board, whiteAtBottom)
-        val totalPieces = board.sumOf { row -> row.count { it != '.' } }
-        val isValid = totalPieces >= 4
+        // Проверяем ориентацию доски по положению королей
+        var whiteKingRow = -1
+        var blackKingRow = -1
+        for (r in 0 until 8) {
+            for (c in 0 until 8) {
+                if (board[r][c] == 'K') whiteKingRow = r
+                if (board[r][c] == 'k') blackKingRow = r
+            }
+        }
+        val detectedWhiteBottom = if (whiteKingRow != -1 && blackKingRow != -1) {
+            whiteKingRow > blackKingRow
+        } else {
+            whiteAtBottom
+        }
+
+        enforceSingleKing(board, kingScore, isWhite = true)
+        enforceSingleKing(board, kingScore, isWhite = false)
+
+        var totalPieces = 0
+        var whiteKing = false
+        var blackKing = false
+        for (r in 0 until 8) {
+            for (c in 0 until 8) {
+                val p = board[r][c]
+                if (p != '.') totalPieces++
+                if (p == 'K') whiteKing = true
+                if (p == 'k') blackKing = true
+            }
+        }
+
+        val isValid = whiteKing && blackKing && totalPieces >= 2
+        val fen = buildFen(board, detectedWhiteBottom)
 
         return ScanResult(
             board = board,
             fen = fen,
             isValid = isValid,
-            statusNote = "OK ($totalPieces фиг.)",
+            statusNote = if (isValid) "OK ($totalPieces фиг.)" else "Поиск королей...",
             continueButtonActive = continueActive,
-            detectedWhiteAtBottom = whiteAtBottom
+            detectedWhiteAtBottom = detectedWhiteBottom
         )
     }
 
-    private fun classifyCellSimple(
+    private fun classifyCell(
         bmp: Bitmap,
         cellX: Int,
         cellY: Int,
         cellW: Int,
         cellH: Int,
-        row: Int
-    ): Char {
-        val N = 24
+        row: Int,
+        col: Int
+    ): Pair<Char, Int> {
+        val N = 32
         var whitePixels = 0
         var blackPixels = 0
         var totalSamples = 0
+        var bgLumSum = 0
 
-        for (gy in 4 until N - 4) {
-            for (gx in 4 until N - 4) {
+        for (gy in 3 until N - 3) {
+            for (gx in 3 until N - 3) {
+                if (gx <= 9 && gy <= 7) continue // пропускаем метки оверлея
                 val px = (cellX + (gx + 0.5f) * cellW / N).toInt().coerceIn(0, bmp.width - 1)
                 val py = (cellY + (gy + 0.5f) * cellH / N).toInt().coerceIn(0, bmp.height - 1)
                 val c = bmp.getPixel(px, py)
@@ -131,32 +153,70 @@ object BoardRecognizer {
                 val g = Color.green(c)
                 val b = Color.blue(c)
 
-                // Пропускаем зелёные элементы оверлея
-                if (g > r + 30 && g > b + 15) continue
+                if (g > r + 35 && g > b + 20) continue // зелёная стрелка
 
                 val lum = (r * 299 + g * 587 + b * 114) / 1000
                 totalSamples++
 
                 if (lum >= 155) {
                     whitePixels++
-                } else if (lum in 65..154 && b >= r + 2) {
+                } else if (lum in 62..154 && b >= r + 2) {
                     blackPixels++
+                } else {
+                    bgLumSum += lum
                 }
             }
         }
 
-        if (totalSamples == 0) return '.'
+        if (totalSamples == 0) return '.' to -1000
 
-        val whiteRatio = whitePixels.toFloat() / totalSamples
-        val blackRatio = blackPixels.toFloat() / totalSamples
-
-        // Пешки занимают меньше места, чем крупные фигуры
-        return if (whiteRatio >= 0.18f) {
-            if (row == 1 || row == 6) 'P' else if (whiteRatio > 0.35f) 'Q' else 'P'
-        } else if (blackRatio >= 0.18f) {
-            if (row == 1 || row == 6) 'p' else if (blackRatio > 0.35f) 'q' else 'p'
+        val isWhite: Boolean
+        val density: Float
+        if (whitePixels >= 42 && whitePixels >= blackPixels) {
+            isWhite = true
+            density = whitePixels.toFloat() / totalSamples
+        } else if (blackPixels >= 38) {
+            isWhite = false
+            density = blackPixels.toFloat() / totalSamples
         } else {
-            '.'
+            return '.' to -1000
+        }
+
+        // Определяем тип фигуры по ряду и плотности пикселей
+        val pieceChar = when {
+            density < 0.22f -> if (isWhite) 'P' else 'p' // Пешка
+            row == 0 || row == 7 -> {
+                // Базовый задний ряд Duolingo
+                when (col) {
+                    0, 7 -> if (isWhite) 'R' else 'r'
+                    1, 6 -> if (isWhite) 'N' else 'n'
+                    2, 5 -> if (isWhite) 'B' else 'b'
+                    3 -> if (isWhite) 'Q' else 'q'
+                    4 -> if (isWhite) 'K' else 'k'
+                    else -> if (isWhite) 'P' else 'p'
+                }
+            }
+            density > 0.42f -> if (isWhite) 'Q' else 'q'
+            else -> if (isWhite) 'N' else 'n'
+        }
+
+        val score = if (pieceChar.lowercaseChar() == 'k') 100 else (density * 100).toInt()
+        return pieceChar to score
+    }
+
+    private fun enforceSingleKing(board: Array<CharArray>, kingScore: Array<IntArray>, isWhite: Boolean) {
+        val target = if (isWhite) 'K' else 'k'
+        val coords = mutableListOf<Pair<Int, Int>>()
+        for (r in 0 until 8) {
+            for (c in 0 until 8) {
+                if (board[r][c] == target) coords.add(r to c)
+            }
+        }
+        if (coords.size > 1) {
+            val best = coords.maxByOrNull { (r, c) -> kingScore[r][c] } ?: coords[0]
+            for (pos in coords) {
+                if (pos != best) board[pos.first][pos.second] = if (isWhite) 'Q' else 'q'
+            }
         }
     }
 
@@ -168,9 +228,6 @@ object BoardRecognizer {
 
         var greenPixels = 0
         var total = 0
-        val stepX = max(8, (xEnd - xStart) / 25)
-        val stepY = max(6, (yEnd - yStart) / 8)
-
         var y = yStart
         while (y < yEnd) {
             var x = xStart
@@ -179,13 +236,11 @@ object BoardRecognizer {
                 val r = Color.red(c)
                 val g = Color.green(c)
                 val b = Color.blue(c)
-                if (g > 170 && g > r + 55 && g > b + 80) {
-                    greenPixels++
-                }
+                if (g > 170 && g > r + 55 && g > b + 80) greenPixels++
                 total++
-                x += stepX
+                x += max(8, (xEnd - xStart) / 25)
             }
-            y += stepY
+            y += max(6, (yEnd - yStart) / 8)
         }
         return total > 0 && (greenPixels.toFloat() / total) > 0.35f
     }
