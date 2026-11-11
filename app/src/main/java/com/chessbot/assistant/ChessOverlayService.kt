@@ -351,9 +351,9 @@ class ChessOverlayService : Service() {
                     }
 
                     val scan = withContext(Dispatchers.Default) {
-                        val scan = BoardRecognizer.recognizeBoard(frame, leftPx, topPx, sizePx)
-                    boardOverlay.whiteAtBottom = scan.detectedWhiteAtBottom
+                        BoardRecognizer.recognizeBoard(frame, leftPx, topPx, sizePx)
                     }
+                    overlay.whiteAtBottom = scan.detectedWhiteAtBottom
 
                     overlay.detectedBoard = scan.board
 
@@ -372,7 +372,7 @@ class ChessOverlayService : Service() {
 
                     if (scan.isValid) {
                         val analysis = withContext(Dispatchers.Default) {
-                            chessEngine.analyzePosition(scan.fen, 380)
+                            chessEngine.analyzePosition(scan.fen, 900)
                         }
                         overlay.bestMoveUci = analysis.bestMoveUci
                         overlay.ponderMoveUci = analysis.ponderMoveUci
