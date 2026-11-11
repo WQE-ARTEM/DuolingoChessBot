@@ -22,8 +22,6 @@ import android.os.IBinder
 import android.os.Looper
 import android.provider.Settings
 import android.view.Gravity
-import android.view.MotionEvent
-import android.view.View
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.LinearLayout
@@ -55,9 +53,8 @@ class ChessOverlayService : Service() {
 
     private var autoPlayEnabled = false
     private var isManualEditing = false
-    private var selectedCellForMove: Pair<Int, Int>? = null
+    private var selectedSquareForMove: Pair<Int, Int>? = null
 
-    // Внутренняя доска бота для ручной расстановки и трекинга (чёрные снизу по умолчанию)
     private var internalBoard = arrayOf(
         charArrayOf('R', 'N', 'B', 'K', 'Q', 'B', 'N', 'R'),
         charArrayOf('P', 'P', 'P', 'P', 'P', 'P', 'P', 'P'),
@@ -107,7 +104,6 @@ class ChessOverlayService : Service() {
                 mediaProjection = mpManager.getMediaProjection(resultCode, data)
                 mediaProjection?.registerCallback(projectionCallback, mainHandler)
                 setupVirtualDisplay()
-                startEngineLoop()
             }
         } catch (_: Throwable) {}
         return START_NOT_STICKY
@@ -155,7 +151,6 @@ class ChessOverlayService : Service() {
 
         windowManager.addView(overlayView, overlayParams)
 
-        // Панель управления с кнопками
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setBackgroundColor(Color.argb(230, 25, 35, 40))
@@ -253,7 +248,6 @@ class ChessOverlayService : Service() {
             boardOverlay?.detectedBoard = internalBoard
             boardOverlay?.invalidate()
 
-            // Дублируем этот ход на игровой доске Duolingo автоматически!
             val fromFileChar = ('a' + fromC)
             val fromRankChar = ('1' + (7 - fromR))
             val toFileChar = ('a' + c)
@@ -266,19 +260,15 @@ class ChessOverlayService : Service() {
                 val top = boardOverlay?.boardTopPx ?: 0f
                 val size = boardOverlay?.boardSizePx ?: screenWidth.toFloat()
                 
-                // Временно разрешаем клики сквозь сервис для отправки жеста в Duolingo
                 setAutoClickable(false)
                 autoMoveService.performChessMove(uci, left, top, size, whiteAtBottom = false) {
                     setAutoClickable(true)
                     statusText?.text = "⏳ Жду ответ соперника..."
-                    // Запускаем Stockfish для поиска ответа
                     calculateBestMove()
                 }
             }
         }
     }
-
-    private var selectedSquareForMove: Pair<Int, Int>? = null
 
     private fun setAutoClickable(clickable: Boolean) {
         val params = controlPanel?.layoutParams as? WindowManager.LayoutParams ?: return
@@ -293,17 +283,15 @@ class ChessOverlayService : Service() {
     private fun calculateBestMove() {
         serviceScope.launch(Dispatchers.Default) {
             val fen = buildFen(internalBoard, whiteAtBottom = false)
-            val result = chessEngine.findBestMove(fen, movetimeMs = 500)
+            val bestMove = chessEngine.getBestMove(fen, movetimeMs = 500)
             withContext(Dispatchers.Main) {
-                if (result != null) {
-                    boardOverlay?.bestMoveUci = result.bestMove
-                    boardOverlay?.evalScoreCp = result.evalCp
+                if (bestMove != null && bestMove.length >= 4) {
+                    boardOverlay?.bestMoveUci = bestMove
                     boardOverlay?.invalidate()
-                    statusText?.text = "Оценка: ${result.evalCp} cp. Ход: ${result.bestMove}"
+                    statusText?.text = "Ход бота: $bestMove"
 
-                    if (autoPlayEnabled && result.bestMove.length >= 4) {
-                        // Автоматически ходим за бота
-                        executeBotMove(result.bestMove)
+                    if (autoPlayEnabled) {
+                        executeBotMove(bestMove)
                     }
                 }
             }
@@ -374,10 +362,6 @@ class ChessOverlayService : Service() {
         )
     }
 
-    private fun startEngineLoop() {
-        // Фоновый цикл ожидания
-    }
-
     private fun stopCaptureResources() {
         virtualDisplay?.release()
         imageReader?.close()
@@ -392,5 +376,5 @@ class ChessOverlayService : Service() {
         super.onDestroy()
     }
 
-    override fun onBind(intent: Intent?): Intent? = null
+    override fun onBind(intent: Intent?): IBinder? = null
 }
