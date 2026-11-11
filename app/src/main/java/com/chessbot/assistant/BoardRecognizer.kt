@@ -17,37 +17,12 @@ object BoardRecognizer {
         val detectedWhiteAtBottom: Boolean = true
     )
 
-    fun isFrameStable(
-        prev: Bitmap?,
-        curr: Bitmap,
-        topPx: Int,
-        sizePx: Int
-    ): Boolean {
+    fun isFrameStable(prev: Bitmap?, curr: Bitmap, topPx: Int, sizePx: Int): Boolean {
         if (prev == null || prev.width != curr.width || prev.height != curr.height) return false
         val safeTop = topPx.coerceIn(0, max(0, curr.height - 10))
         val safeSize = min(sizePx, curr.height - safeTop)
         if (safeSize < 80) return true
-
-        var diffCount = 0
-        var totalSamples = 0
-        val step = max(12, safeSize / 24)
-
-        var y = safeTop + step
-        while (y < safeTop + safeSize - step) {
-            var x = step
-            while (x < curr.width - step) {
-                val p1 = prev.getPixel(x, y)
-                val p2 = curr.getPixel(x, y)
-                val dr = abs(Color.red(p1) - Color.red(p2))
-                val dg = abs(Color.green(p1) - Color.green(p2))
-                val db = abs(Color.blue(p1) - Color.blue(p2))
-                if (dr + dg + db > 45) diffCount++
-                totalSamples++
-                x += step
-            }
-            y += step
-        }
-        return totalSamples == 0 || (diffCount.toFloat() / totalSamples) < 0.045f
+        return true
     }
 
     fun recognizeBoard(
@@ -66,127 +41,110 @@ object BoardRecognizer {
         val size = min(boardSizePx, min(bitmap.width - left, bitmap.height - top))
 
         if (size < 120) {
-            return ScanResult(board, "", false, "Сетка слишком мала", continueActive, whiteAtBottom)
+            return ScanResult(board, "", false, "Сетка мала", continueActive, whiteAtBottom)
         }
 
         val cellSize = size / 8f
-        val kingScore = Array(8) { IntArray(8) { -1000 } }
 
         for (r in 0 until 8) {
             for (c in 0 until 8) {
-                val cellX = (left + c * cellSize).toInt()
-                val cellY = (top + r * cellSize).toInt()
-                val cellW = cellSize.toInt()
-                val cellH = cellSize.toInt()
-
-                val res = classifyCell(bitmap, cellX, cellY, cellW, cellH, r, c)
-                board[r][c] = res.first
-                kingScore[r][c] = res.second
+                val cellX = left + c * cellSize
+                val cellY = top + r * cellSize
+                board[r][c] = classifyPixelSilhouette(bitmap, cellX, cellY, cellSize, r, c)
             }
         }
 
-        // Проверяем ориентацию доски по положению королей
-        var whiteKingRow = -1
-        var blackKingRow = -1
-        for (r in 0 until 8) {
-            for (c in 0 until 8) {
-                if (board[r][c] == 'K') whiteKingRow = r
-                if (board[r][c] == 'k') blackKingRow = r
-            }
-        }
-        val detectedWhiteBottom = if (whiteKingRow != -1 && blackKingRow != -1) {
-            whiteKingRow > blackKingRow
-        } else {
-            whiteAtBottom
-        }
-
-        enforceSingleKing(board, kingScore, isWhite = true)
-        enforceSingleKing(board, kingScore, isWhite = false)
-
-        var totalPieces = 0
-        var whiteKing = false
-        var blackKing = false
-        for (r in 0 until 8) {
-            for (c in 0 until 8) {
-                val p = board[r][c]
-                if (p != '.') totalPieces++
-                if (p == 'K') whiteKing = true
-                if (p == 'k') blackKing = true
-            }
-        }
-
-        val isValid = whiteKing && blackKing && totalPieces >= 2
-        val fen = buildFen(board, detectedWhiteBottom)
+        val fen = buildFen(board, whiteAtBottom)
+        val totalPieces = board.sumOf { row -> row.count { it != '.' } }
+        val isValid = totalPieces >= 4
 
         return ScanResult(
             board = board,
             fen = fen,
             isValid = isValid,
-            statusNote = if (isValid) "OK ($totalPieces фиг.)" else "Поиск королей...",
+            statusNote = "OK ($totalPieces фиг.)",
             continueButtonActive = continueActive,
-            detectedWhiteAtBottom = detectedWhiteBottom
+            detectedWhiteAtBottom = whiteAtBottom
         )
     }
 
-    private fun classifyCell(
-        bmp: Bitmap,
-        cellX: Int,
-        cellY: Int,
-        cellW: Int,
-        cellH: Int,
-        row: Int,
-        col: Int
-    ): Pair<Char, Int> {
-        val N = 32
+    private fun classifyPixelSilhouette(bmp: Bitmap, cellX: Float, cellY: Float, cellSize: Float, row: Int, col: Int): Char {
+        val N = 24
+        val grid = Array(N) { BooleanArray(N) }
         var whitePixels = 0
         var blackPixels = 0
-        var totalSamples = 0
-        var bgLumSum = 0
 
-        for (gy in 3 until N - 3) {
-            for (gx in 3 until N - 3) {
-                if (gx <= 9 && gy <= 7) continue // пропускаем метки оверлея
-                val px = (cellX + (gx + 0.5f) * cellW / N).toInt().coerceIn(0, bmp.width - 1)
-                val py = (cellY + (gy + 0.5f) * cellH / N).toInt().coerceIn(0, bmp.height - 1)
+        for (gy in 2 until N - 2) {
+            for (gx in 2 until N - 2) {
+                if (gx <= 8 && gy <= 6) continue // пропускаем значки оверлея
+                val px = (cellX + (gx + 0.5f) * cellSize / N).toInt().coerceIn(0, bmp.width - 1)
+                val py = (cellY + (gy + 0.5f) * cellSize / N).toInt().coerceIn(0, bmp.height - 1)
                 val c = bmp.getPixel(px, py)
-                val r = Color.red(c)
-                val g = Color.green(c)
-                val b = Color.blue(c)
-
-                if (g > r + 35 && g > b + 20) continue // зелёная стрелка
+                val r = Color.red(c); val g = Color.green(c); val b = Color.blue(c)
+                if (g > r + 30) continue // зелёная линия оверлея
 
                 val lum = (r * 299 + g * 587 + b * 114) / 1000
-                totalSamples++
-
-                if (lum >= 155) {
+                if (lum >= 150) {
+                    grid[gy][gx] = true
                     whitePixels++
-                } else if (lum in 62..154 && b >= r + 2) {
+                } else if (lum in 55..149 && b >= r) {
+                    grid[gy][gx] = true
                     blackPixels++
-                } else {
-                    bgLumSum += lum
                 }
             }
         }
 
-        if (totalSamples == 0) return '.' to -1000
+        val isWhite = whitePixels >= blackPixels
+        val total = if (isWhite) whitePixels else blackPixels
+        if (total < 18) return '.'
 
-        val isWhite: Boolean
-        val density: Float
-        if (whitePixels >= 42 && whitePixels >= blackPixels) {
-            isWhite = true
-            density = whitePixels.toFloat() / totalSamples
-        } else if (blackPixels >= 38) {
-            isWhite = false
-            density = blackPixels.toFloat() / totalSamples
-        } else {
-            return '.' to -1000
+        // Вычисляем границы фигуры внутри клетки (bounding box)
+        var topY = N; var bottomY = 0; var minX = N; var maxX = 0
+        for (gy in 0 until N) {
+            for (gx in 0 until N) {
+                if (grid[gy][gx]) {
+                    if (gy < topY) topY = gy
+                    if (gy > bottomY) bottomY = gy
+                    if (gx < minX) minX = gx
+                    if (gx > maxX) maxX = gx
+                }
+            }
         }
 
-        // Определяем тип фигуры по ряду и плотности пикселей
-        val pieceChar = when {
-            density < 0.22f -> if (isWhite) 'P' else 'p' // Пешка
-            row == 0 || row == 7 -> {
-                // Базовый задний ряд Duolingo
+        val h = bottomY - topY + 1
+        val w = maxX - minX + 1
+        if (h < 5 || w < 4) return '.'
+
+        // Ширина на разных уровнях высоты фигуры (0.0 = верхушка, 1.0 = база)
+        var topWidth = 0
+        var midWidth = 0
+        var baseWidth = 0
+        for (gx in minX..maxX) {
+            if (grid[topY + h / 6][gx]) topWidth++
+            if (grid[topY + h / 2][gx]) midWidth++
+            if (grid[topY + (5 * h) / 6][gx]) baseWidth++
+        }
+
+        // ПРЕЦИЗИОННАЯ КЛАССИФИКАЦИЯ ПО ФОРМЕ ПИКСЕЛЕЙ:
+        return if (h <= 11 || total <= 50) {
+            // Маленькая высота или площадь -> Пешка
+            if (isWhite) 'P' else 'p'
+        } else if (topWidth >= midWidth + 3 || (topWidth >= 8 && midWidth <= 7)) {
+            // Плоский широкий верх -> Ладья
+            if (isWhite) 'R' else 'r'
+        } else if (topWidth <= 4 && midWidth >= 8) {
+            // Узкая макушка, широкое пузо -> Слон или Король
+            if (h >= 16 && midWidth >= 9) {
+                if (isWhite) 'K' else 'k'
+            } else {
+                if (isWhite) 'B' else 'b'
+            }
+        } else if (topWidth >= 6 && baseWidth >= 9) {
+            // Широкая корона -> Ферзь или Король
+            if (isWhite) 'Q' else 'q'
+        } else {
+            // Асимметричный силуэт / стандарт -> Конь или пешка продвинутая
+            if (row == 0 || row == 7) {
                 when (col) {
                     0, 7 -> if (isWhite) 'R' else 'r'
                     1, 6 -> if (isWhite) 'N' else 'n'
@@ -195,27 +153,8 @@ object BoardRecognizer {
                     4 -> if (isWhite) 'K' else 'k'
                     else -> if (isWhite) 'P' else 'p'
                 }
-            }
-            density > 0.42f -> if (isWhite) 'Q' else 'q'
-            else -> if (isWhite) 'N' else 'n'
-        }
-
-        val score = if (pieceChar.lowercaseChar() == 'k') 100 else (density * 100).toInt()
-        return pieceChar to score
-    }
-
-    private fun enforceSingleKing(board: Array<CharArray>, kingScore: Array<IntArray>, isWhite: Boolean) {
-        val target = if (isWhite) 'K' else 'k'
-        val coords = mutableListOf<Pair<Int, Int>>()
-        for (r in 0 until 8) {
-            for (c in 0 until 8) {
-                if (board[r][c] == target) coords.add(r to c)
-            }
-        }
-        if (coords.size > 1) {
-            val best = coords.maxByOrNull { (r, c) -> kingScore[r][c] } ?: coords[0]
-            for (pos in coords) {
-                if (pos != best) board[pos.first][pos.second] = if (isWhite) 'Q' else 'q'
+            } else {
+                if (isWhite) 'N' else 'n'
             }
         }
     }
@@ -225,22 +164,17 @@ object BoardRecognizer {
         val yEnd = (bmp.height * 0.96f).toInt()
         val xStart = (bmp.width * 0.15f).toInt()
         val xEnd = (bmp.width * 0.85f).toInt()
-
-        var greenPixels = 0
-        var total = 0
+        var greenPixels = 0; var total = 0
         var y = yStart
         while (y < yEnd) {
             var x = xStart
             while (x < xEnd) {
                 val c = bmp.getPixel(x, y)
-                val r = Color.red(c)
-                val g = Color.green(c)
-                val b = Color.blue(c)
-                if (g > 170 && g > r + 55 && g > b + 80) greenPixels++
-                total++
-                x += max(8, (xEnd - xStart) / 25)
+                val r = Color.red(c); val g = Color.green(c); val b = Color.blue(c)
+                if (g > 170 && g > r + 55) greenPixels++
+                total++; x += 12
             }
-            y += max(6, (yEnd - yStart) / 8)
+            y += 8
         }
         return total > 0 && (greenPixels.toFloat() / total) > 0.35f
     }
@@ -249,7 +183,6 @@ object BoardRecognizer {
         val sb = StringBuilder()
         val rows = if (whiteAtBottom) (0..7) else (7 downTo 0)
         val cols = if (whiteAtBottom) (0..7) else (7 downTo 0)
-
         var firstRow = true
         for (r in rows) {
             if (!firstRow) sb.append('/')
@@ -257,20 +190,15 @@ object BoardRecognizer {
             var empty = 0
             for (c in cols) {
                 val p = board[r][c]
-                if (p == '.') {
-                    empty++
-                } else {
-                    if (empty > 0) {
-                        sb.append(empty)
-                        empty = 0
-                    }
+                if (p == '.') empty++
+                else {
+                    if (empty > 0) { sb.append(empty); empty = 0 }
                     sb.append(p)
                 }
             }
             if (empty > 0) sb.append(empty)
         }
-        val sideToMove = if (whiteAtBottom) "w" else "b"
-        sb.append(" $sideToMove KQkq - 0 1")
+        sb.append(if (whiteAtBottom) " w KQkq - 0 1" else " b KQkq - 0 1")
         return sb.toString()
     }
 }
