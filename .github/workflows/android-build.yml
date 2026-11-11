@@ -9,10 +9,13 @@ concurrency:
   group: android-build-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: write
+
 jobs:
   build:
-    runs-on: ubuntu-latest
-    timeout-minutes: 8
+    runs-on: ubuntu-22.04
+    timeout-minutes: 6
 
     steps:
       - name: Checkout Code
@@ -25,14 +28,23 @@ jobs:
           distribution: 'temurin'
           cache: 'gradle'
 
-      - name: Grant execute permission for gradlew
-        run: chmod +x gradlew
+      - name: Build Debug APK
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon --parallel --build-cache
 
-      - name: Build APK Directly
-        run: ./gradlew assembleDebug --no-daemon --parallel --build-cache
-
-      - name: Upload APK
+      - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: DuolingoChessBot-Debug
-          path: app/build/outputs/apk/debug/*.apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+      - name: Publish Latest Release APK
+        run: |
+          gh release delete latest -y --cleanup-tag || true
+          gh release create latest app/build/outputs/apk/debug/app-debug.apk \
+            --title "DuolingoChessBot Latest APK" \
+            --notes "Автоматическая сборка интерактивной доски бота"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
