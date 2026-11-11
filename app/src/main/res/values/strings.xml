@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">ChessBot Overlay</string>
+    <string name="acc_desc">Автоматическое выполнение шахматных ходов для Duolingo Chess</string>
+</resources>
