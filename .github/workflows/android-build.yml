@@ -15,7 +15,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 6
+    timeout-minutes: 8
 
     steps:
       - name: Checkout Code
@@ -26,12 +26,13 @@ jobs:
         with:
           java-version: '17'
           distribution: 'temurin'
-          cache: 'gradle'
 
-      - name: Build Debug APK
+      - name: Clean Termux overrides and Build Debug APK
         run: |
+          sed -i '/aapt2/d' gradle.properties 2>/dev/null || true
+          rm -f local.properties app/gradle.properties
           chmod +x gradlew
-          ./gradlew assembleDebug --no-daemon --parallel --build-cache
+          ./gradlew assembleDebug --no-daemon --no-build-cache -Pandroid.aapt2FromMavenOverride=""
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
