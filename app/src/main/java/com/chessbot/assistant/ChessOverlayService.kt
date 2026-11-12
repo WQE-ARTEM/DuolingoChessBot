@@ -22,23 +22,30 @@ import android.os.IBinder
 import android.os.Looper
 import android.provider.Settings
 import android.view.Gravity
+import android.view.MotionEvent
+import android.view.View
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.*
-import kotlin.math.min
+import kotlin.math.abs
 
 class ChessOverlayService : Service() {
 
     private lateinit var windowManager: WindowManager
     private var boardOverlay: BoardOverlayView? = null
     private var overlayParams: WindowManager.LayoutParams? = null
+
     private var controlPanel: LinearLayout? = null
+    private var panelParams: WindowManager.LayoutParams? = null
+
+    private var miniBubble: Button? = null
+    private var bubbleParams: WindowManager.LayoutParams? = null
+
     private var statusText: TextView? = null
-    private var btnPlayBest: Button? = null
-    private var btnPassThrough: Button? = null
+    private var btnTouchMode: Button? = null
 
     private var mediaProjection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
@@ -53,17 +60,16 @@ class ChessOverlayService : Service() {
     private var screenHeight = 2400
     private var screenDensity = 420
 
-    // Настройки партии
     private var playerIsWhite = true
     private var autoPlayEnabled = false
     private var isFreeEditMode = false
     private var isDeleteMode = false
-    private var passThroughTouch = false
 
-    // Фазы:
-    // 0 = Ждём 1-й ход (ты ходишь сам на доске бота, он дублирует в игру)
-    // 1 = Ждём ход соперника (Оскара) — определяется автоматически по экрану или твоим тапом
-    // 2 = Очередь бота (предлагает лучший ход стрелкой / кнопкой "▶️ Сходить" или ходит сам при Авто: ВКЛ)
+    // false = экран полностью свободен (клики сквозь доску в игру)
+    // true = доска бота принимает тапы для выбора фигур
+    private var boardTouchEnabled = false
+    private var isMinimized = false
+
     private var gamePhase = 0
     private var selectedCell: Pair<Int, Int>? = null
     private var currentBestMoveUci: String = ""
@@ -122,7 +128,7 @@ class ChessOverlayService : Service() {
         nm.createNotificationChannel(channel)
         val notification: Notification = NotificationCompat.Builder(this, channelId)
             .setContentTitle("Duolingo Chess Bot активен")
-            .setContentText("Интерактивная доска бота + дублирование ходов")
+            .setContentText("Экран разблокирован + кнопка Скрыть")
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setOngoing(true)
             .build()
@@ -134,45 +140,55 @@ class ChessOverlayService : Service() {
     }
 
     private fun setupOverlays() {
+        val boardTopY = (screenHeight * 0.352f).toInt()
+        val boardSize = screenWidth
+
         val overlayView = BoardOverlayView(this).apply {
             boardLeftPx = 0f
-            boardTopPx = screenHeight * 0.352f
-            boardSizePx = screenWidth.toFloat()
+            boardTopPx = boardTopY.toFloat()
+            boardSizePx = boardSize.toFloat()
             whiteAtBottom = playerIsWhite
             detectedBoard = internalBoard
-            touchInteractive = true
+            touchInteractive = false
             onBoardCellClick = { r, c -> onUserTappedBoard(r, c) }
         }
         boardOverlay = overlayView
 
-        val params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.MATCH_PARENT,
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-            else
-                WindowManager.LayoutParams.TYPE_PHONE,
+        val overlayType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+        else
+            WindowManager.LayoutParams.TYPE_PHONE
+
+        // ВАЖНО: По умолчанию FLAG_NOT_TOUCHABLE ВКЛЮЧЕН — ты можешь свободно пользоваться всем экраном!
+        val bParams = WindowManager.LayoutParams(
+            boardSize,
+            boardSize,
+            overlayType,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                     WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
             PixelFormat.TRANSLUCENT
-        ).apply { gravity = Gravity.TOP or Gravity.START }
-        overlayParams = params
-        windowManager.addView(overlayView, params)
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = 0
+            y = boardTopY
+        }
+        overlayParams = bParams
+        windowManager.addView(overlayView, bParams)
 
-        // Компактная двухрядная панель управления
+        // Панель управления (компактная и перетаскиваемая за строку статуса)
         val rootPanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.argb(235, 22, 30, 38))
-            setPadding(12, 8, 12, 8)
+            setBackgroundColor(Color.argb(235, 20, 28, 36))
+            setPadding(10, 6, 10, 6)
         }
         controlPanel = rootPanel
 
         statusText = TextView(this).apply {
-            text = "1-й ход: нажми свою фигуру и клетку (я сдублирую в игру)"
+            text = "🔓 Экран свободен! Нажми [👆 Тап доски], чтобы указать ход"
             setTextColor(Color.rgb(120, 255, 160))
-            textSize = 12.5f
-            setPadding(6, 2, 6, 6)
+            textSize = 12f
+            setPadding(6, 4, 6, 6)
         }
         rootPanel.addView(statusText)
 
@@ -182,13 +198,47 @@ class ChessOverlayService : Service() {
         fun makeBtn(label: String, bg: Int = Color.rgb(45, 62, 78)): Button {
             return Button(this).apply {
                 text = label
-                textSize = 11f
+                textSize = 10.5f
                 setTextColor(Color.WHITE)
                 setBackgroundColor(bg)
-                setPadding(10, 4, 10, 4)
+                setPadding(6, 4, 6, 4)
                 val lp = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-                lp.setMargins(3, 2, 3, 2)
+                lp.setMargins(2, 2, 2, 2)
                 layoutParams = lp
+            }
+        }
+
+        val btnTouch = makeBtn("👆 Тап доски", Color.rgb(25, 115, 160)).apply {
+            setOnClickListener {
+                setBoardInteractive(!boardTouchEnabled)
+            }
+        }
+        btnTouchMode = btnTouch
+
+        val btnBest = makeBtn("▶️ Сходить", Color.rgb(35, 140, 75)).apply {
+            setOnClickListener {
+                if (currentBestMoveUci.length >= 4) {
+                    executeMoveOnBothBoards(currentBestMoveUci)
+                } else {
+                    runEngineSuggestion()
+                }
+            }
+        }
+
+        val btnAuto = makeBtn("Авто: ВЫКЛ").apply {
+            setOnClickListener {
+                autoPlayEnabled = !autoPlayEnabled
+                text = if (autoPlayEnabled) "Авто: ВКЛ" else "Авто: ВЫКЛ"
+                setBackgroundColor(if (autoPlayEnabled) Color.rgb(30, 130, 70) else Color.rgb(45, 62, 78))
+                if (autoPlayEnabled && gamePhase == 2 && currentBestMoveUci.length >= 4) {
+                    executeMoveOnBothBoards(currentBestMoveUci)
+                }
+            }
+        }
+
+        val btnHide = makeBtn("🔽 Скрыть", Color.rgb(120, 75, 25)).apply {
+            setOnClickListener {
+                setMinimizedState(true)
             }
         }
 
@@ -201,31 +251,9 @@ class ChessOverlayService : Service() {
             }
         }
 
-        val btnReset = makeBtn("🔄 Новая").apply {
+        val btnReset = makeBtn("🔄 Сброс").apply {
             setOnClickListener { resetBoardState() }
         }
-
-        val btnAuto = makeBtn("Авто: ВЫКЛ").apply {
-            setOnClickListener {
-                autoPlayEnabled = !autoPlayEnabled
-                text = if (autoPlayEnabled) "Авто: ВКЛ" else "Авто: ВЫКЛ"
-                setBackgroundColor(if (autoPlayEnabled) Color.rgb(30, 130, 70) else Color.rgb(45, 62, 78))
-                if (autoPlayEnabled && gamePhase == 2 && currentBestMoveUci.length >= 4) {
-                    executeMoveOnBothBoards(currentBestMoveUci, isBotMove = true)
-                }
-            }
-        }
-
-        val btnBest = makeBtn("▶️ Сходить", Color.rgb(35, 140, 75)).apply {
-            setOnClickListener {
-                if (currentBestMoveUci.length >= 4) {
-                    executeMoveOnBothBoards(currentBestMoveUci, isBotMove = true)
-                } else {
-                    runEngineSuggestion()
-                }
-            }
-        }
-        btnPlayBest = btnBest
 
         val btnEdit = makeBtn("🎮 Игра").apply {
             setOnClickListener {
@@ -235,92 +263,185 @@ class ChessOverlayService : Service() {
                 boardOverlay?.selectedBoardCell = null
                 text = if (isFreeEditMode) "✏️ Ред." else "🎮 Игра"
                 setBackgroundColor(if (isFreeEditMode) Color.rgb(160, 105, 20) else Color.rgb(45, 62, 78))
-                statusText?.text = if (isFreeEditMode) {
-                    "✏️ Свободная перестановка: двигай любую фигуру без хода в игре"
+                if (isFreeEditMode) {
+                    setBoardInteractive(true)
+                    statusText?.text = "✏️ Режим ред.: переставляй фигуры на доске бота"
                 } else {
-                    "🎮 Режим игры активен"
+                    setBoardInteractive(false)
                 }
                 boardOverlay?.invalidate()
             }
         }
 
-        val btnDel = makeBtn("🗑 Стереть").apply {
+        val btnDel = makeBtn("🗑").apply {
+            layoutParams = LinearLayout.LayoutParams(85, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                setMargins(2, 2, 2, 2)
+            }
             setOnClickListener {
                 isDeleteMode = !isDeleteMode
-                selectedCell = null
-                boardOverlay?.selectedBoardCell = null
+                if (isDeleteMode) setBoardInteractive(true)
                 setBackgroundColor(if (isDeleteMode) Color.rgb(180, 45, 45) else Color.rgb(45, 62, 78))
-                statusText?.text = if (isDeleteMode) "Тапни по фигуре, чтобы убрать её с доски бота" else "Удаление выключено"
+                statusText?.text = if (isDeleteMode) "Тапни по фигуре на доске, чтобы удалить её" else "Удаление выкл."
             }
         }
-
-        val btnPass = makeBtn("✋ Доска").apply {
-            setOnClickListener {
-                setOverlayPassThrough(!passThroughTouch)
-            }
-        }
-        btnPassThrough = btnPass
 
         val btnClose = makeBtn("✖", Color.rgb(150, 40, 40)).apply {
-            layoutParams = LinearLayout.LayoutParams(90, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-                setMargins(3, 2, 3, 2)
+            layoutParams = LinearLayout.LayoutParams(85, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                setMargins(2, 2, 2, 2)
             }
             setOnClickListener { stopSelf() }
         }
 
-        row1.addView(btnSide)
-        row1.addView(btnReset)
-        row1.addView(btnAuto)
+        row1.addView(btnTouch)
         row1.addView(btnBest)
+        row1.addView(btnAuto)
+        row1.addView(btnHide)
 
+        row2.addView(btnSide)
+        row2.addView(btnReset)
         row2.addView(btnEdit)
         row2.addView(btnDel)
-        row2.addView(btnPass)
         row2.addView(btnClose)
 
         rootPanel.addView(row1)
         rootPanel.addView(row2)
 
-        val panelParams = WindowManager.LayoutParams(
+        val pParams = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-            else
-                WindowManager.LayoutParams.TYPE_PHONE,
+            overlayType,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            y = (screenHeight * 0.11f).toInt()
+            y = (screenHeight * 0.08f).toInt()
         }
+        panelParams = pParams
 
-        windowManager.addView(rootPanel, panelParams)
+        // Позволяем перетаскивать панель вверх-вниз за текстовую строку статуса
+        statusText?.setOnTouchListener(object : View.OnTouchListener {
+            private var startY = 0
+            private var touchY = 0f
+            override fun onTouch(v: View, e: MotionEvent): Boolean {
+                when (e.action) {
+                    MotionEvent.ACTION_DOWN -> {
+                        startY = pParams.y
+                        touchY = e.rawY
+                        return true
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        pParams.y = (startY + (e.rawY - touchY).toInt()).coerceIn(40, screenHeight - 300)
+                        windowManager.updateViewLayout(rootPanel, pParams)
+                        return true
+                    }
+                }
+                return false
+            }
+        })
+
+        windowManager.addView(rootPanel, pParams)
+
+        // Плавающая мини-кнопка "♟️", которая появляется, когда бот скрыт
+        val bubble = Button(this).apply {
+            text = "♟️ Бот"
+            textSize = 13f
+            setTextColor(Color.WHITE)
+            setBackgroundColor(Color.argb(230, 25, 135, 80))
+            setPadding(16, 10, 16, 10)
+            visibility = View.GONE
+        }
+        miniBubble = bubble
+
+        val bubParams = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            overlayType,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.END
+            x = 16
+            y = (screenHeight * 0.15f).toInt()
+        }
+        bubbleParams = bubParams
+
+        bubble.setOnTouchListener(object : View.OnTouchListener {
+            private var initialX = 0
+            private var initialY = 0
+            private var downX = 0f
+            private var downY = 0f
+            override fun onTouch(v: View, e: MotionEvent): Boolean {
+                when (e.action) {
+                    MotionEvent.ACTION_DOWN -> {
+                        initialX = bubParams.x
+                        initialY = bubParams.y
+                        downX = e.rawX
+                        downY = e.rawY
+                        return true
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        bubParams.x = (initialX - (e.rawX - downX).toInt()).coerceAtLeast(0)
+                        bubParams.y = (initialY + (e.rawY - downY).toInt()).coerceIn(40, screenHeight - 200)
+                        windowManager.updateViewLayout(bubble, bubParams)
+                        return true
+                    }
+                    MotionEvent.ACTION_UP -> {
+                        if (abs(e.rawX - downX) < 20 && abs(e.rawY - downY) < 20) {
+                            setMinimizedState(false)
+                        }
+                        return true
+                    }
+                }
+                return false
+            }
+        })
+
+        windowManager.addView(bubble, bubParams)
     }
 
-    private fun setOverlayPassThrough(passThrough: Boolean) {
-        passThroughTouch = passThrough
+    // Переключает режим: либо доска бота принимает тапы, либо весь экран полностью свободен для использования
+    private fun setBoardInteractive(interactive: Boolean) {
+        boardTouchEnabled = interactive
         val view = boardOverlay ?: return
         val params = overlayParams ?: return
-        view.touchInteractive = !passThrough
-        if (passThrough) {
-            params.flags = params.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-            btnPassThrough?.text = "👁 Сквозь"
-            btnPassThrough?.setBackgroundColor(Color.rgb(140, 80, 20))
-            statusText?.text = "👁 Клики проходят сквозь оверлей прямо в Duolingo"
-        } else {
+        view.touchInteractive = interactive
+
+        if (interactive) {
             params.flags = params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
-            btnPassThrough?.text = "✋ Доска"
-            btnPassThrough?.setBackgroundColor(Color.rgb(45, 62, 78))
+            btnTouchMode?.text = "🔓 В игру"
+            btnTouchMode?.setBackgroundColor(Color.rgb(210, 120, 20))
+            statusText?.text = "👆 Тапни по доске бота: откуда ➔ куда"
+        } else {
+            params.flags = params.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+            btnTouchMode?.text = "👆 Тап доски"
+            btnTouchMode?.setBackgroundColor(Color.rgb(25, 115, 160))
+            statusText?.text = "🔓 Экран свободен! Можешь нажимать что угодно в телефоне"
         }
-        windowManager.updateViewLayout(view, params)
+        try {
+            windowManager.updateViewLayout(view, params)
+        } catch (_: Throwable) {}
+    }
+
+    // Полное скрытие / разворачивание оверлея и панели
+    private fun setMinimizedState(minimize: Boolean) {
+        isMinimized = minimize
+        if (minimize) {
+            setBoardInteractive(false)
+            boardOverlay?.visibility = View.GONE
+            controlPanel?.visibility = View.GONE
+            miniBubble?.visibility = View.VISIBLE
+        } else {
+            boardOverlay?.visibility = View.VISIBLE
+            controlPanel?.visibility = View.VISIBLE
+            miniBubble?.visibility = View.GONE
+        }
     }
 
     private fun resetBoardState() {
         internalBoard = createInitialBoard()
         selectedCell = null
         currentBestMoveUci = ""
-        gamePhase = 0 // Всегда ждём 1-й ход!
+        gamePhase = 0
         boardOverlay?.detectedBoard = internalBoard
         boardOverlay?.selectedBoardCell = null
         boardOverlay?.lastMovedCells = null
@@ -328,19 +449,20 @@ class ChessOverlayService : Service() {
         boardOverlay?.ponderMoveUci = null
         boardOverlay?.invalidate()
 
-        val sideStr = if (playerIsWhite) "Белыми" else "Чёрными"
-        statusText?.text = "⏳ 1-й ход ($sideStr): укажи свой 1-й ход (или ход врага) на доске"
+        setBoardInteractive(false)
+        val sideStr = if (playerIsWhite) "Белые" else "Чёрные"
+        statusText?.text = "🔄 Сброшено ($sideStr). Нажми [👆 Тап доски] для 1-го хода"
     }
 
     private fun onUserTappedBoard(r: Int, c: Int) {
         if (isExecutingGesture) return
 
-        // Режим удаления фигуры
         if (isDeleteMode) {
             internalBoard[r][c] = '.'
             isDeleteMode = false
             boardOverlay?.invalidate()
-            statusText?.text = "Фигура удалена. Продолжаем."
+            setBoardInteractive(false)
+            statusText?.text = "Фигура удалена. Экран снова свободен."
             return
         }
 
@@ -352,7 +474,7 @@ class ChessOverlayService : Service() {
             boardOverlay?.selectedBoardCell = r to c
             boardOverlay?.invalidate()
             val sqName = "${('a' + c)}${8 - r}"
-            statusText?.text = "Выбрана ${getPieceName(piece)} на $sqName ➔ тапни куда пойти"
+            statusText?.text = "Выбрана ${getPieceName(piece)} ($sqName) ➔ тапни куда пойти"
             return
         }
 
@@ -368,20 +490,18 @@ class ChessOverlayService : Service() {
         val movingPiece = internalBoard[fromR][fromC]
         val targetPiece = internalBoard[r][c]
 
-        // Если тапнули на другую фигуру того же цвета (и не в режиме редактирования) — переключаем выбор на неё
         if (!isFreeEditMode && targetPiece != '.' && targetPiece.isUpperCase() == movingPiece.isUpperCase()) {
             selectedCell = r to c
             boardOverlay?.selectedBoardCell = r to c
             boardOverlay?.invalidate()
             val sqName = "${('a' + c)}${8 - r}"
-            statusText?.text = "Переключено на ${getPieceName(targetPiece)} ($sqName) ➔ куда пойти?"
+            statusText?.text = "Переключено на ${getPieceName(targetPiece)} ($sqName) ➔ куда?"
             return
         }
 
         selectedCell = null
         boardOverlay?.selectedBoardCell = null
 
-        // Если включён режим свободной редакции — просто переставляем на доске бота без клика в игру
         if (isFreeEditMode) {
             applyMoveToInternalBoard(fromR, fromC, r, c)
             boardOverlay?.invalidate()
@@ -389,14 +509,15 @@ class ChessOverlayService : Service() {
             return
         }
 
+        // Как только ход указан — сразу возвращаем свободный экран!
+        setBoardInteractive(false)
+
         val uci = toUci(fromR, fromC, r, c, movingPiece)
         val isPlayerPiece = movingPiece.isUpperCase() == playerIsWhite
 
         if (isPlayerPiece) {
-            // Игрок сделал СВОЙ ход на доске бота -> дублируем его в Duolingo и ждём ответ соперника!
-            executeMoveOnBothBoards(uci, isBotMove = false)
+            executeMoveOnBothBoards(uci)
         } else {
-            // Игрок вручную указал ход СОПЕРНИКА (Оскара) на доске бота -> обновляем доску и сразу считаем лучший ответ!
             applyMoveToInternalBoard(fromR, fromC, r, c)
             boardOverlay?.lastMovedCells = (fromR to fromC) to (r to c)
             boardOverlay?.invalidate()
@@ -405,7 +526,7 @@ class ChessOverlayService : Service() {
         }
     }
 
-    private fun executeMoveOnBothBoards(uci: String, isBotMove: Boolean) {
+    private fun executeMoveOnBothBoards(uci: String) {
         if (uci.length < 4) return
         val fromC = uci[0] - 'a'
         val fromR = 8 - (uci[1] - '0')
@@ -419,22 +540,19 @@ class ChessOverlayService : Service() {
         currentBestMoveUci = ""
         boardOverlay?.invalidate()
 
+        setBoardInteractive(false)
+
         val svc = AutoMoveService.instance
         if (svc == null) {
             gamePhase = 1
-            statusText?.text = "⚠️ Включи Спец. возможности! Ход $uci записан. Жду ход соперника..."
+            statusText?.text = "⚠️ Спец. возможности выкл.! Ход $uci записан на доске."
             return
         }
 
         isExecutingGesture = true
         val overlay = boardOverlay ?: return
-        val params = overlayParams ?: return
 
-        // Временно делаем оверлей прозрачным для тачей, чтобы жест AutoMoveService попал точно в Duolingo
-        params.flags = params.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-        windowManager.updateViewLayout(overlay, params)
-
-        statusText?.text = "🤖 Дублирую ход $uci на игровую доску..."
+        statusText?.text = "🤖 Делаю ход $uci в игре..."
 
         svc.performChessMove(
             uciMove = uci,
@@ -444,13 +562,9 @@ class ChessOverlayService : Service() {
             whiteAtBottom = playerIsWhite
         ) {
             mainHandler.postDelayed({
-                if (!passThroughTouch) {
-                    params.flags = params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
-                    windowManager.updateViewLayout(overlay, params)
-                }
                 isExecutingGesture = false
                 gamePhase = 1
-                statusText?.text = "👀 Жду ответ соперника (сходит сам или укажи его ход на доске)..."
+                statusText?.text = "👀 Жду ответ соперника (экран свободен)..."
             }, 250L)
         }
     }
@@ -460,8 +574,7 @@ class ChessOverlayService : Service() {
         watcherJob = serviceScope.launch {
             while (isActive) {
                 delay(450L)
-                // Автоматически ловим ответный ход соперника в фазе 1
-                if (gamePhase != 1 || isExecutingGesture || isFreeEditMode) continue
+                if (isMinimized || gamePhase != 1 || isExecutingGesture || isFreeEditMode) continue
 
                 val frame = captureScreenBitmap() ?: continue
                 val overlay = boardOverlay ?: continue
@@ -480,7 +593,7 @@ class ChessOverlayService : Service() {
                     boardOverlay?.invalidate()
                     gamePhase = 2
                     val uci = "${('a' + from.second)}${8 - from.first}${('a' + to.second)}${8 - to.first}"
-                    statusText?.text = "⚡ Соперник сходил $uci! Считаю лучший ответ..."
+                    statusText?.text = "⚡ Соперник сходил $uci! Считаю ответ..."
                     runEngineSuggestion()
                 }
             }
@@ -539,11 +652,11 @@ class ChessOverlayService : Service() {
                 boardOverlay?.invalidate()
 
                 val sign = if (result.evalCp >= 0) "+" else ""
-                statusText?.text = "💡 Лучший ход: ${result.bestMove} ($sign${result.evalCp / 100f}) ➔ нажми [▶️ Сходить]"
+                statusText?.text = "💡 Ход: ${result.bestMove} ($sign${result.evalCp / 100f}) ➔ жми [▶️ Сходить]"
 
                 if (autoPlayEnabled) {
                     delay(300L)
-                    executeMoveOnBothBoards(result.bestMove, isBotMove = true)
+                    executeMoveOnBothBoards(result.bestMove)
                 }
             }
         }
@@ -553,7 +666,6 @@ class ChessOverlayService : Service() {
         val piece = internalBoard[fromR][fromC]
         internalBoard[fromR][fromC] = '.'
 
-        // Авто-превращение пешки в ферзя на последней горизонтали
         val finalPiece = when {
             piece == 'P' && toR == 0 -> 'Q'
             piece == 'p' && toR == 7 -> 'q'
@@ -561,12 +673,11 @@ class ChessOverlayService : Service() {
         }
         internalBoard[toR][toC] = finalPiece
 
-        // Авто-рокировка ладьи, если король прыгнул на 2 клетки
-        if ((piece == 'K' || piece == 'k') && kotlin.math.abs(toC - fromC) == 2) {
-            if (toC == 6) { // Короткая рокировка (g1/g8)
+        if ((piece == 'K' || piece == 'k') && abs(toC - fromC) == 2) {
+            if (toC == 6) {
                 internalBoard[toR][5] = internalBoard[toR][7]
                 internalBoard[toR][7] = '.'
-            } else if (toC == 2) { // Длинная рокировка (c1/c8)
+            } else if (toC == 2) {
                 internalBoard[toR][3] = internalBoard[toR][0]
                 internalBoard[toR][0] = '.'
             }
@@ -644,6 +755,7 @@ class ChessOverlayService : Service() {
         stopCaptureResources()
         try { boardOverlay?.let { windowManager.removeView(it) } } catch (_: Throwable) {}
         try { controlPanel?.let { windowManager.removeView(it) } } catch (_: Throwable) {}
+        try { miniBubble?.let { windowManager.removeView(it) } } catch (_: Throwable) {}
         super.onDestroy()
     }
 
