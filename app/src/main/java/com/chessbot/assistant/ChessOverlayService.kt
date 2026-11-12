@@ -61,6 +61,7 @@ class ChessOverlayService : Service() {
     private var screenHeight = 2400
     private var screenDensity = 420
 
+    private var isChessComMode = false
     private var playerIsWhite = true
     private var autoPlayEnabled = false
     private var isFreeEditMode = false
@@ -90,16 +91,26 @@ class ChessOverlayService : Service() {
         screenWidth = (bounds.width() / 2) * 2
         screenHeight = (bounds.height() / 2) * 2
         screenDensity = metrics.densityDpi
-        // Выровнено под реальную позицию доски Duolingo (0.330f вместо старых 0.352f)
-        boardTopY = (screenHeight * 0.330f).toInt()
+        boardTopY = (screenHeight * 0.326f).toInt()
         chessEngine = ChessEngine(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         try {
+            val mode = intent?.getStringExtra("GAME_MODE") ?: "DUOLINGO"
+            isChessComMode = (mode == "CHESS_COM")
+            boardTopY = if (isChessComMode) {
+                (screenHeight * 0.324f).toInt()
+            } else {
+                (screenHeight * 0.330f).toInt()
+            }
+
             startForegroundWithNotification()
             if (Settings.canDrawOverlays(this) && boardOverlay == null) {
                 setupOverlays()
+            } else {
+                val modeTitle = if (isChessComMode) "Chess.com" else "Duolingo"
+                statusText?.text = "Режим: $modeTitle. Нажми [🔍 Скан] для чтения доски!"
             }
 
             val resultCode = intent?.getIntExtra("RESULT_CODE", Activity.RESULT_CANCELED) ?: Activity.RESULT_CANCELED
@@ -127,9 +138,10 @@ class ChessOverlayService : Service() {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val channel = NotificationChannel(channelId, "ChessBot", NotificationManager.IMPORTANCE_LOW)
         nm.createNotificationChannel(channel)
+        val modeName = if (isChessComMode) "Chess.com" else "Duolingo"
         val notification: Notification = NotificationCompat.Builder(this, channelId)
-            .setContentTitle("Duolingo Chess Bot активен")
-            .setContentText("Авто-сканер доски + калибровка сетки")
+            .setContentTitle("Chess Bot ($modeName) активен")
+            .setContentText("Авто-сканер фигур + подсказки")
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setOngoing(true)
             .build()
@@ -182,8 +194,9 @@ class ChessOverlayService : Service() {
         }
         controlPanel = rootPanel
 
+        val modeTitle = if (isChessComMode) "♟️ Chess.com" else "🦉 Duolingo"
         statusText = TextView(this).apply {
-            text = "🔓 Экран свободен! Нажми [🔍 Скан] для любой задачи или партии"
+            text = "$modeTitle | Экран свободен! Нажми [🔍 Скан] в задаче/игре"
             setTextColor(Color.rgb(120, 255, 160))
             textSize = 11.5f
             setPadding(6, 2, 6, 4)
@@ -278,7 +291,6 @@ class ChessOverlayService : Service() {
         }
         btnEditMode = btnEdit
 
-        // Кнопки точного сдвига доски вверх/вниз, если нужно подстроить сетку
         val btnUp = makeBtn("⬆️", Color.rgb(55, 75, 95), 0.55f).apply {
             setOnClickListener { shiftBoardY(-10) }
         }
@@ -408,7 +420,7 @@ class ChessOverlayService : Service() {
             windowManager.updateViewLayout(view, params)
             view.invalidate()
         } catch (_: Throwable) {}
-        statusText?.text = "📐 Сетка доски сдвинута (Y=$boardTopY). Жми [🔍 Скан]"
+        statusText?.text = "📐 Сетка сдвинута (Y=$boardTopY). Жми [🔍 Скан]"
     }
 
     private fun setBoardInteractive(interactive: Boolean) {
@@ -463,10 +475,9 @@ class ChessOverlayService : Service() {
         boardOverlay?.ponderMoveUci = null
         boardOverlay?.invalidate()
         setBoardInteractive(false)
-        statusText?.text = "🔄 Стандартная начальная доска установлена!"
+        statusText?.text = "🔄 Стандартная начальная расстановка установлена!"
     }
 
-    // Принудительное полное сканирование доски с экрана (и авто-калибровка высоты доски)
     private fun forceScanFromScreenNow() {
         serviceScope.launch {
             isFreeEditMode = false
@@ -474,25 +485,24 @@ class ChessOverlayService : Service() {
             btnEditMode?.setBackgroundColor(Color.rgb(45, 62, 78))
             setBoardInteractive(false)
 
-            // Временно прячем оверлей на 80 мс, чтобы сфотографировать чистый экран игры без наших значков
+            // Скрываем сетку на 100 мс, чтобы сфотографировать чистую доску без значков
             boardOverlay?.visibility = View.INVISIBLE
-            delay(90L)
+            delay(100L)
             val frame = captureScreenBitmap()
             boardOverlay?.visibility = View.VISIBLE
 
             if (frame == null) {
-                statusText?.text = "⚠️ Кадр экрана ещё не готов, нажми [🔍 Скан] ещё раз"
+                statusText?.text = "⚠️ Кадр ещё не готов, нажми [🔍 Скан] ещё раз"
                 return@launch
             }
 
             withContext(Dispatchers.Default) {
-                val detectedY = BoardRecognizer.findBoardTopY(frame, boardTopY)
-                if (abs(detectedY - boardTopY) in 4..180) {
+                val detectedY = BoardRecognizer.findBoardTopY(frame, boardTopY, isChessComMode)
+                if (abs(detectedY - boardTopY) in 3..220) {
                     boardTopY = detectedY
                 }
             }
 
-            // Выравниваем окно оверлея ровно по найденному краю доски
             overlayParams?.let { p ->
                 p.y = boardTopY
                 boardOverlay?.boardTopPx = boardTopY.toFloat()
@@ -500,7 +510,7 @@ class ChessOverlayService : Service() {
             }
 
             val scannedScreenGrid = withContext(Dispatchers.Default) {
-                BoardRecognizer.scanFullBoardFromScreen(frame, 0, boardTopY, screenWidth)
+                BoardRecognizer.scanFullBoardFromScreen(frame, 0, boardTopY, screenWidth, isChessComMode)
             }
 
             if (scannedScreenGrid != null) {
@@ -523,7 +533,6 @@ class ChessOverlayService : Service() {
     private fun onUserTappedBoard(r: Int, c: Int) {
         if (isExecutingGesture) return
 
-        // В режиме "✏️ Ред." тап по клетке циклически меняет фигуру (удобно для любых головоломок!)
         if (isFreeEditMode) {
             val cycle = if (playerIsWhite) {
                 charArrayOf('.', 'P', 'N', 'B', 'R', 'Q', 'K', 'p', 'n', 'b', 'r', 'q', 'k')
@@ -628,12 +637,11 @@ class ChessOverlayService : Service() {
         ) {
             mainHandler.postDelayed({
                 isExecutingGesture = false
-                statusText?.text = "👀 Жду ответ соперника (или новую задачу)..."
+                statusText?.text = "👀 Жду ответ соперника..."
             }, 350L)
         }
     }
 
-    // Непрерывный умный цикл: сам ловит и одиночный ход соперника, и начало новой задачи/партии!
     private fun startScreenSyncLoop() {
         watcherJob?.cancel()
         watcherJob = serviceScope.launch {
@@ -666,7 +674,6 @@ class ChessOverlayService : Service() {
                         }
                     }
                     is SyncResult.NewBoardDetected -> {
-                        // Началась новая партия или головоломка — полностью обновляем доску с экрана!
                         forceScanFromScreenNow()
                     }
                     else -> {}
@@ -682,7 +689,7 @@ class ChessOverlayService : Service() {
     }
 
     private fun analyzeScreenChanges(frame: Bitmap): SyncResult {
-        val screenPresence = BoardRecognizer.scanPresence(frame, 0, boardTopY, screenWidth) ?: return SyncResult.NoChange
+        val screenPresence = BoardRecognizer.scanPresence(frame, 0, boardTopY, screenWidth, isChessComMode) ?: return SyncResult.NoChange
 
         val vacated = mutableListOf<Pair<Int, Int>>()
         val arrived = mutableListOf<Pair<Int, Int>>()
@@ -713,12 +720,10 @@ class ChessOverlayService : Service() {
 
         if (totalDiffs == 0) return SyncResult.NoChange
 
-        // Если изменились ровно 2 клетки (1 освободилась и 1 занялась/срублена) — это обычный шахматный ход
         if (vacated.size == 1 && arrived.size == 1 && totalDiffs == 2) {
             return SyncResult.SingleMove(vacated[0], arrived[0])
         }
 
-        // Если на экране изменилось 4 и более клеток (началась новая задача или новая партия!)
         if (totalDiffs >= 4) {
             return SyncResult.NewBoardDetected
         }

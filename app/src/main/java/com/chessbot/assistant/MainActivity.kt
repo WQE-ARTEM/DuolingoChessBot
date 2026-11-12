@@ -3,15 +3,12 @@ package com.chessbot.assistant
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
-import android.graphics.Color
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
-import android.view.Gravity
 import android.widget.Button
-import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -19,90 +16,80 @@ import androidx.appcompat.app.AppCompatActivity
 
 class MainActivity : AppCompatActivity() {
 
-    private lateinit var statusView: TextView
+    private lateinit var tvStatus: TextView
+    private var selectedGameMode: String = "DUOLINGO"
 
-    private val projectionLauncher = registerForActivityResult(
+    private val screenCaptureLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
         if (result.resultCode == Activity.RESULT_OK && result.data != null) {
             val serviceIntent = Intent(this, ChessOverlayService::class.java).apply {
                 putExtra("RESULT_CODE", result.resultCode)
                 putExtra("DATA_INTENT", result.data)
+                putExtra("GAME_MODE", selectedGameMode)
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(serviceIntent)
-            else startService(serviceIntent)
-            Toast.makeText(this, "ChessBot запущен! Откройте Duolingo Chess.", Toast.LENGTH_LONG).show()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(serviceIntent)
+            } else {
+                startService(serviceIntent)
+            }
             finish()
         } else {
-            Toast.makeText(this, "Разрешение на захват экрана отклонено", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Захват экрана отменён", Toast.LENGTH_SHORT).show()
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_main)
 
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
-            setBackgroundColor(Color.rgb(19, 31, 36))
-            setPadding(48, 48, 48, 48)
+        tvStatus = findViewById(R.id.tvStatus)
+
+        findViewById<Button>(R.id.btnOverlayPerm).setOnClickListener {
+            if (!Settings.canDrawOverlays(this)) {
+                val intent = Intent(
+                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:$packageName")
+                )
+                startActivity(intent)
+            } else {
+                Toast.makeText(this, "Разрешение Оверлея уже включено!", Toast.LENGTH_SHORT).show()
+            }
         }
 
-        root.addView(TextView(this).apply {
-            text = "♟️ Duolingo Chess Bot\n(Overlay + Auto-Move)"
-            textSize = 22f
-            setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER
-            setPadding(0, 0, 0, 32)
-        })
-
-        statusView = TextView(this).apply {
-            textSize = 14f
-            setTextColor(Color.rgb(200, 220, 230))
-            setPadding(0, 0, 0, 40)
+        findViewById<Button>(R.id.btnAccessibilityPerm).setOnClickListener {
+            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
         }
-        root.addView(statusView)
 
-        root.addView(Button(this).apply {
-            text = "1. Разрешить Поверх других окон (Overlay)"
-            setOnClickListener {
-                if (!Settings.canDrawOverlays(this@MainActivity)) {
-                    startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
-                } else {
-                    Toast.makeText(this@MainActivity, "Уже разрешено!", Toast.LENGTH_SHORT).show()
-                }
-            }
-        })
+        findViewById<Button>(R.id.btnStartDuolingo).setOnClickListener {
+            startBotWithMode("DUOLINGO")
+        }
 
-        root.addView(Button(this).apply {
-            text = "2. Включить Авто-кликер (Accessibility)"
-            setOnClickListener { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
-        })
+        findViewById<Button>(R.id.btnStartChessCom).setOnClickListener {
+            startBotWithMode("CHESS_COM")
+        }
+    }
 
-        root.addView(Button(this).apply {
-            text = "🚀 3. ЗАПУСТИТЬ БОТА"
-            setBackgroundColor(Color.rgb(88, 204, 2))
-            setTextColor(Color.BLACK)
-            textSize = 16f
-            setOnClickListener {
-                if (!Settings.canDrawOverlays(this@MainActivity)) {
-                    Toast.makeText(this@MainActivity, "Сначала выдайте разрешение №1 (Overlay)!", Toast.LENGTH_SHORT).show()
-                    return@setOnClickListener
-                }
-                val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-                projectionLauncher.launch(mpManager.createScreenCaptureIntent())
-            }
-        })
-
-        setContentView(root)
+    private fun startBotWithMode(mode: String) {
+        if (!Settings.canDrawOverlays(this)) {
+            Toast.makeText(this, "Сначала включи пункт 1 (Поверх других окон)!", Toast.LENGTH_LONG).show()
+            return
+        }
+        selectedGameMode = mode
+        val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+        screenCaptureLauncher.launch(mpManager.createScreenCaptureIntent())
     }
 
     override fun onResume() {
         super.onResume()
+        updatePermStatus()
+    }
+
+    private fun updatePermStatus() {
         val overlayOk = Settings.canDrawOverlays(this)
         val accOk = AutoMoveService.instance != null
-        statusView.text = "Статус разрешений:\n" +
+        tvStatus.text = "Статус разрешений:\n" +
                 "• Оверлей (рисование стрелок): ${if (overlayOk) "✅ ВКЛ" else "❌ ВЫКЛ"}\n" +
-                "• Accessibility (авто-ходы): ${if (accOk) "✅ ВКЛ" else "⚠️ ВЫКЛ (работают только подсказки)"}"
+                "• Accessibility (авто-ходы): ${if (accOk) "✅ ВКЛ" else "⚠️ ВЫКЛ (нажми п.2)"}"
     }
 }

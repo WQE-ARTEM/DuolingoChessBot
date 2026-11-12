@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:gravity="center"
+    android:padding="24dp"
+    android:background="#12181F">
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="♟️ Chess Bot Assistant\n(Duolingo + Chess.com)"
+        android:textColor="#FFFFFF"
+        android:textSize="22sp"
+        android:textStyle="bold"
+        android:gravity="center"
+        android:layout_marginBottom="20dp" />
+
+    <TextView
+        android:id="@+id/tvStatus"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Статус разрешений:"
+        android:textColor="#B0BEC5"
+        android:textSize="14sp"
+        android:layout_marginBottom="16dp" />
+
+    <Button
+        android:id="@+id/btnOverlayPerm"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="1. РАЗРЕШИТЬ ПОВЕРХ ДРУГИХ ОКОН (OVERLAY)"
+        android:backgroundTint="#455A64"
+        android:textColor="#FFFFFF"
+        android:layout_marginBottom="10dp" />
+
+    <Button
+        android:id="@+id/btnAccessibilityPerm"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="2. ВКЛЮЧИТЬ АВТО-КЛИКЕР (ACCESSIBILITY)"
+        android:backgroundTint="#455A64"
+        android:textColor="#FFFFFF"
+        android:layout_marginBottom="18dp" />
+
+    <Button
+        android:id="@+id/btnStartDuolingo"
+        android:layout_width="match_parent"
+        android:layout_height="56dp"
+        android:text="🦉 3. ЗАПУСТИТЬ ДЛЯ DUOLINGO"
+        android:textSize="15sp"
+        android:textStyle="bold"
+        android:backgroundTint="#58CC02"
+        android:textColor="#FFFFFF"
+        android:layout_marginBottom="12dp" />
+
+    <Button
+        android:id="@+id/btnStartChessCom"
+        android:layout_width="match_parent"
+        android:layout_height="56dp"
+        android:text="♟️ 4. ЗАПУСТИТЬ ДЛЯ ШАХМАТ (CHESS.COM)"
+        android:textSize="15sp"
+        android:textStyle="bold"
+        android:backgroundTint="#1E88E5"
+        android:textColor="#FFFFFF" />
+
+</LinearLayout>
