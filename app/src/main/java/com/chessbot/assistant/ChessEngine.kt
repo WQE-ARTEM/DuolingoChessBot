@@ -37,21 +37,40 @@ class ChessEngine(private val context: Context? = null) {
         this['K'.code] = 20000; this['k'.code] = 20000
     }
 
-    fun analyze(board: Array<CharArray>, whiteToMove: Boolean, maxDepth: Int = 5): EngineResult {
+    fun analyze(board: Array<CharArray>, whiteToMove: Boolean, maxDepth: Int = 4): EngineResult {
         val rootMoves = generateLegalMoves(board, whiteToMove)
         if (rootMoves.isEmpty()) return EngineResult("", "", 0)
 
         var bestMove = rootMoves[0]
-        var bestScore = if (whiteToMove) -99999 else 99999
+        var bestScore = if (whiteToMove) -999999 else 999999
 
+        // 1. Сначала проверяем, есть ли МАТ В 1 ХОД — если есть, возвращаем его мгновенно!
+        for (m in rootMoves) {
+            val cap = board[m.toR][m.toC]
+            val mov = board[m.fromR][m.fromC]
+            board[m.toR][m.toC] = if (m.promo != '.') m.promo else mov
+            board[m.fromR][m.fromC] = '.'
+
+            val enemyLegal = generateLegalMoves(board, !whiteToMove)
+            val givesCheck = isKingInCheck(board, !whiteToMove)
+
+            board[m.fromR][m.fromC] = mov
+            board[m.toR][m.toC] = cap
+
+            if (enemyLegal.isEmpty() && givesCheck) {
+                return EngineResult(m.toUci(), "", if (whiteToMove) 99000 else -99000)
+            }
+        }
+
+        // 2. Итеративное углубление Alpha-Beta с проверкой мата и пата на любой глубине
         for (d in 1..maxDepth) {
-            var alpha = -100000
-            var beta = 100000
+            var alpha = -1000000
+            var beta = 1000000
             var currentBest = bestMove
-            var currentBestScore = if (whiteToMove) -99999 else 99999
+            var currentBestScore = if (whiteToMove) -999999 else 999999
 
             val ordered = rootMoves.sortedByDescending {
-                if (it.toUci() == bestMove.toUci()) 1000000 else it.score
+                if (it.toUci() == bestMove.toUci()) 10000000 else it.score
             }
 
             for (m in ordered) {
@@ -81,9 +100,10 @@ class ChessEngine(private val context: Context? = null) {
             }
             bestMove = currentBest
             bestScore = currentBestScore
+            if (abs(bestScore) >= 85000) break
         }
 
-        // Вычисляем ответный ход (ponder)
+        // Вычисляем ожидаемый ответ соперника (ponder)
         val cap = board[bestMove.toR][bestMove.toC]
         val mov = board[bestMove.fromR][bestMove.fromC]
         board[bestMove.toR][bestMove.toC] = if (bestMove.promo != '.') bestMove.promo else mov
@@ -91,7 +111,20 @@ class ChessEngine(private val context: Context? = null) {
         val replyMoves = generateLegalMoves(board, !whiteToMove)
         var ponderUci = ""
         if (replyMoves.isNotEmpty()) {
-            ponderUci = replyMoves.maxByOrNull { it.score }?.toUci() ?: ""
+            var bestReply = replyMoves[0]
+            var bestReplyEval = if (!whiteToMove) -999999 else 999999
+            for (rm in replyMoves) {
+                val c2 = board[rm.toR][rm.toC]
+                val m2 = board[rm.fromR][rm.fromC]
+                board[rm.toR][rm.toC] = if (rm.promo != '.') rm.promo else m2
+                board[rm.fromR][rm.fromC] = '.'
+                val ev = evaluate(board)
+                board[rm.fromR][rm.fromC] = m2
+                board[rm.toR][rm.toC] = c2
+                if (!whiteToMove && ev > bestReplyEval) { bestReplyEval = ev; bestReply = rm }
+                else if (whiteToMove && ev < bestReplyEval) { bestReplyEval = ev; bestReply = rm }
+            }
+            ponderUci = bestReply.toUci()
         }
         board[bestMove.fromR][bestMove.fromC] = mov
         board[bestMove.toR][bestMove.toC] = cap
@@ -106,18 +139,24 @@ class ChessEngine(private val context: Context? = null) {
         betaInit: Int,
         whiteToMove: Boolean
     ): Int {
+        val legalMoves = generateLegalMoves(board, whiteToMove)
+        if (legalMoves.isEmpty()) {
+            return if (isKingInCheck(board, whiteToMove)) {
+                if (whiteToMove) -90000 - depth * 500 else 90000 + depth * 500
+            } else {
+                0 // Пат (ничья)
+            }
+        }
+
         if (depth <= 0) return evaluate(board)
+
         var alpha = alphaInit
         var beta = betaInit
 
-        val moves = generatePseudoMoves(board, whiteToMove)
-        if (moves.isEmpty()) return evaluate(board)
-
         if (whiteToMove) {
-            var value = -99999
-            for (m in moves) {
+            var value = -999999
+            for (m in legalMoves) {
                 val cap = board[m.toR][m.toC]
-                if (cap == 'k' || cap == 'K') return 90000 + depth * 100
                 val mov = board[m.fromR][m.fromC]
                 board[m.toR][m.toC] = if (m.promo != '.') m.promo else mov
                 board[m.fromR][m.fromC] = '.'
@@ -132,10 +171,9 @@ class ChessEngine(private val context: Context? = null) {
             }
             return value
         } else {
-            var value = 99999
-            for (m in moves) {
+            var value = 999999
+            for (m in legalMoves) {
                 val cap = board[m.toR][m.toC]
-                if (cap == 'K' || cap == 'k') return -90000 - depth * 100
                 val mov = board[m.fromR][m.fromC]
                 board[m.toR][m.toC] = if (m.promo != '.') m.promo else mov
                 board[m.fromR][m.fromC] = '.'
@@ -161,15 +199,15 @@ class ChessEngine(private val context: Context? = null) {
                 val isW = p.isUpperCase()
                 var v = pieceVal[p.code]
 
-                // Позиционный бонус за центр и продвижение
                 val centerBonus = (3 - abs(3 - c)) * 6 + (3 - abs(3 - r)) * 6
                 when (p.lowercaseChar()) {
                     'p' -> {
                         val adv = if (isW) (6 - r) else (r - 1)
-                        v += adv * 12 + centerBonus
+                        v += adv * 15 + centerBonus
                     }
                     'n', 'b' -> v += centerBonus * 2
-                    'q', 'r' -> v += centerBonus
+                    'r' -> v += (if ((isW && r == 1) || (!isW && r == 6)) 35 else 0)
+                    'q' -> v += centerBonus
                 }
                 if (isW) score += v else score -= v
             }
@@ -193,7 +231,7 @@ class ChessEngine(private val context: Context? = null) {
 
             if (!inCheck) legal.add(m)
         }
-        return legal.ifEmpty { pseudo }
+        return legal
     }
 
     private fun isKingInCheck(board: Array<CharArray>, whiteKing: Boolean): Boolean {
@@ -225,7 +263,7 @@ class ChessEngine(private val context: Context? = null) {
                         if (nr in 0..7) {
                             if (board[nr][c] == '.') {
                                 val pr = if (nr == promoRank) promoChar else '.'
-                                moves.add(Move(r, c, nr, c, pr, if (pr != '.') 800 else 10))
+                                moves.add(Move(r, c, nr, c, pr, if (pr != '.') 900 else 10))
                                 val nnr = r + dir * 2
                                 if (r == startRank && nnr in 0..7 && board[nnr][c] == '.') {
                                     moves.add(Move(r, c, nnr, c, '.', 15))

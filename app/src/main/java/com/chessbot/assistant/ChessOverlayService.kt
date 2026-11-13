@@ -461,6 +461,19 @@ class ChessOverlayService : Service() {
     }
 
     private fun resetToNewStandardGame() {
+        serviceScope.launch {
+            boardOverlay?.visibility = View.INVISIBLE
+            delay(80L)
+            val frame = captureScreenBitmap()
+            boardOverlay?.visibility = View.VISIBLE
+            if (frame != null) {
+                val detY = withContext(Dispatchers.Default) { BoardRecognizer.findBoardTopY(frame, boardTopY, isChessComMode) }
+                if (abs(detY - boardTopY) in 3..220) {
+                    boardTopY = detY
+                    overlayParams?.let { p -> p.y = boardTopY; boardOverlay?.boardTopPx = boardTopY.toFloat(); try { windowManager.updateViewLayout(boardOverlay, p) } catch (_: Throwable) {} }
+                }
+            }
+        }
         isFreeEditMode = false
         btnEditMode?.text = "🎮 Игра"
         btnEditMode?.setBackgroundColor(Color.rgb(45, 62, 78))
