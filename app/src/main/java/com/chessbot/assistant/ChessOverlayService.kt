@@ -51,6 +51,7 @@ class ChessOverlayService : Service() {
     private var mediaProjection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
     private var imageReader: ImageReader? = null
+    private var lastCapturedBitmap: Bitmap? = null
     private lateinit var chessEngine: ChessEngine
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -73,7 +74,6 @@ class ChessOverlayService : Service() {
     private var selectedCell: Pair<Int, Int>? = null
     private var currentBestMoveUci: String = ""
     private var isExecutingGesture = false
-    private var lastPositionSignature: String = ""
 
     private var internalBoard = createInitialBoard()
 
@@ -108,9 +108,6 @@ class ChessOverlayService : Service() {
             startForegroundWithNotification()
             if (Settings.canDrawOverlays(this) && boardOverlay == null) {
                 setupOverlays()
-            } else {
-                val modeTitle = if (isChessComMode) "Chess.com" else "Duolingo"
-                statusText?.text = "Режим: $modeTitle. Нажми [🔍 Скан] для чтения доски!"
             }
 
             val resultCode = intent?.getIntExtra("RESULT_CODE", Activity.RESULT_CANCELED) ?: Activity.RESULT_CANCELED
@@ -141,7 +138,7 @@ class ChessOverlayService : Service() {
         val modeName = if (isChessComMode) "Chess.com" else "Duolingo"
         val notification: Notification = NotificationCompat.Builder(this, channelId)
             .setContentTitle("Chess Bot ($modeName) активен")
-            .setContentText("Авто-сканер фигур + подсказки")
+            .setContentText("Универсальный сканер фигур + авто-ходы")
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setOngoing(true)
             .build()
@@ -196,7 +193,7 @@ class ChessOverlayService : Service() {
 
         val modeTitle = if (isChessComMode) "♟️ Chess.com" else "🦉 Duolingo"
         statusText = TextView(this).apply {
-            text = "$modeTitle | Экран свободен! Нажми [🔍 Скан] в задаче/игре"
+            text = "$modeTitle | Жми [🔍 Скан] для чтения любой позиции!"
             setTextColor(Color.rgb(120, 255, 160))
             textSize = 11.5f
             setPadding(6, 2, 6, 4)
@@ -220,15 +217,11 @@ class ChessOverlayService : Service() {
         }
 
         val btnScan = makeBtn("🔍 Скан", Color.rgb(20, 125, 150)).apply {
-            setOnClickListener {
-                forceScanFromScreenNow()
-            }
+            setOnClickListener { forceScanFromScreenNow() }
         }
 
         val btnTouch = makeBtn("👆 Тап", Color.rgb(45, 95, 140)).apply {
-            setOnClickListener {
-                setBoardInteractive(!boardTouchEnabled)
-            }
+            setOnClickListener { setBoardInteractive(!boardTouchEnabled) }
         }
         btnTouchMode = btnTouch
 
@@ -254,9 +247,7 @@ class ChessOverlayService : Service() {
         }
 
         val btnHide = makeBtn("🔽 Скрыть", Color.rgb(120, 75, 25)).apply {
-            setOnClickListener {
-                setMinimizedState(true)
-            }
+            setOnClickListener { setMinimizedState(true) }
         }
 
         val btnSide = makeBtn("⬜ Белые").apply {
@@ -281,7 +272,7 @@ class ChessOverlayService : Service() {
                 setBackgroundColor(if (isFreeEditMode) Color.rgb(160, 105, 20) else Color.rgb(45, 62, 78))
                 if (isFreeEditMode) {
                     setBoardInteractive(true)
-                    statusText?.text = "✏️ Ред.: тап по фигуре меняет её тип (P➔N➔B➔R➔Q➔K➔пусто)"
+                    statusText?.text = "✏️ Ред.: тап по клетке меняет фигуру (P➔N➔B➔R➔Q➔K➔пусто)"
                 } else {
                     setBoardInteractive(false)
                     runEngineSuggestion()
@@ -292,11 +283,11 @@ class ChessOverlayService : Service() {
         btnEditMode = btnEdit
 
         val btnUp = makeBtn("⬆️", Color.rgb(55, 75, 95), 0.55f).apply {
-            setOnClickListener { shiftBoardY(-10) }
+            setOnClickListener { shiftBoardY(-8) }
         }
 
         val btnDown = makeBtn("⬇️", Color.rgb(55, 75, 95), 0.55f).apply {
-            setOnClickListener { shiftBoardY(10) }
+            setOnClickListener { shiftBoardY(8) }
         }
 
         val btnClose = makeBtn("✖", Color.rgb(150, 40, 40), 0.55f).apply {
@@ -420,7 +411,7 @@ class ChessOverlayService : Service() {
             windowManager.updateViewLayout(view, params)
             view.invalidate()
         } catch (_: Throwable) {}
-        statusText?.text = "📐 Сетка сдвинута (Y=$boardTopY). Жми [🔍 Скан]"
+        statusText?.text = "📐 Сетка Y=$boardTopY. Жми [🔍 Скан]"
     }
 
     private fun setBoardInteractive(interactive: Boolean) {
@@ -461,26 +452,12 @@ class ChessOverlayService : Service() {
     }
 
     private fun resetToNewStandardGame() {
-        serviceScope.launch {
-            boardOverlay?.visibility = View.INVISIBLE
-            delay(80L)
-            val frame = captureScreenBitmap()
-            boardOverlay?.visibility = View.VISIBLE
-            if (frame != null) {
-                val detY = withContext(Dispatchers.Default) { BoardRecognizer.findBoardTopY(frame, boardTopY, isChessComMode) }
-                if (abs(detY - boardTopY) in 3..220) {
-                    boardTopY = detY
-                    overlayParams?.let { p -> p.y = boardTopY; boardOverlay?.boardTopPx = boardTopY.toFloat(); try { windowManager.updateViewLayout(boardOverlay, p) } catch (_: Throwable) {} }
-                }
-            }
-        }
         isFreeEditMode = false
         btnEditMode?.text = "🎮 Игра"
         btnEditMode?.setBackgroundColor(Color.rgb(45, 62, 78))
         internalBoard = createInitialBoard()
         selectedCell = null
         currentBestMoveUci = ""
-        lastPositionSignature = ""
         boardOverlay?.detectedBoard = internalBoard
         boardOverlay?.selectedBoardCell = null
         boardOverlay?.lastMovedCells = null
@@ -488,7 +465,27 @@ class ChessOverlayService : Service() {
         boardOverlay?.ponderMoveUci = null
         boardOverlay?.invalidate()
         setBoardInteractive(false)
-        statusText?.text = "🔄 Стандартная начальная расстановка установлена!"
+
+        serviceScope.launch {
+            boardOverlay?.visibility = View.INVISIBLE
+            delay(120L)
+            val frame = captureScreenBitmap()
+            boardOverlay?.visibility = View.VISIBLE
+            if (frame != null) {
+                val detY = withContext(Dispatchers.Default) {
+                    BoardRecognizer.findBoardTopY(frame, boardTopY, isChessComMode)
+                }
+                if (abs(detY - boardTopY) in 2..240) {
+                    boardTopY = detY
+                    overlayParams?.let { p ->
+                        p.y = boardTopY
+                        boardOverlay?.boardTopPx = boardTopY.toFloat()
+                        try { windowManager.updateViewLayout(boardOverlay, p) } catch (_: Throwable) {}
+                    }
+                }
+            }
+            statusText?.text = "🔄 Новая партия готова (Y=$boardTopY)!"
+        }
     }
 
     private fun forceScanFromScreenNow() {
@@ -498,20 +495,25 @@ class ChessOverlayService : Service() {
             btnEditMode?.setBackgroundColor(Color.rgb(45, 62, 78))
             setBoardInteractive(false)
 
-            // Скрываем сетку на 100 мс, чтобы сфотографировать чистую доску без значков
+            // Убираем стрелки и прячем оверлей, чтобы VirtualDisplay гарантированно отрендерил чистый кадр
+            boardOverlay?.bestMoveUci = null
+            boardOverlay?.ponderMoveUci = null
+            boardOverlay?.invalidate()
             boardOverlay?.visibility = View.INVISIBLE
-            delay(100L)
+            statusText?.text = "📸 Сканирую экран..."
+            delay(140L)
+
             val frame = captureScreenBitmap()
             boardOverlay?.visibility = View.VISIBLE
 
             if (frame == null) {
-                statusText?.text = "⚠️ Кадр ещё не готов, нажми [🔍 Скан] ещё раз"
+                statusText?.text = "⚠️ Экран не обновился, нажми [🔍 Скан] ещё раз"
                 return@launch
             }
 
             withContext(Dispatchers.Default) {
                 val detectedY = BoardRecognizer.findBoardTopY(frame, boardTopY, isChessComMode)
-                if (abs(detectedY - boardTopY) in 3..220) {
+                if (abs(detectedY - boardTopY) in 2..240) {
                     boardTopY = detectedY
                 }
             }
@@ -527,18 +529,20 @@ class ChessOverlayService : Service() {
             }
 
             if (scannedScreenGrid != null) {
+                var countPieces = 0
                 for (sr in 0..7) {
                     for (sc in 0..7) {
                         val br = if (playerIsWhite) sr else 7 - sr
                         val bc = if (playerIsWhite) sc else 7 - sc
-                        internalBoard[br][bc] = scannedScreenGrid[sr][sc]
+                        val piece = scannedScreenGrid[sr][sc]
+                        internalBoard[br][bc] = piece
+                        if (piece != '.') countPieces++
                     }
                 }
                 boardOverlay?.detectedBoard = internalBoard
                 boardOverlay?.lastMovedCells = null
                 boardOverlay?.invalidate()
-                lastPositionSignature = buildPresenceSignature(internalBoard)
-                runEngineSuggestion()
+                runEngineSuggestion(countPieces)
             }
         }
     }
@@ -608,7 +612,6 @@ class ChessOverlayService : Service() {
             applyMoveToInternalBoard(fromR, fromC, r, c)
             boardOverlay?.lastMovedCells = (fromR to fromC) to (r to c)
             boardOverlay?.invalidate()
-            lastPositionSignature = buildPresenceSignature(internalBoard)
             runEngineSuggestion()
         }
     }
@@ -626,7 +629,6 @@ class ChessOverlayService : Service() {
         boardOverlay?.ponderMoveUci = null
         currentBestMoveUci = ""
         boardOverlay?.invalidate()
-        lastPositionSignature = buildPresenceSignature(internalBoard)
 
         setBoardInteractive(false)
 
@@ -676,7 +678,6 @@ class ChessOverlayService : Service() {
                         applyMoveToInternalBoard(from.first, from.second, to.first, to.second)
                         boardOverlay?.lastMovedCells = from to to
                         boardOverlay?.invalidate()
-                        lastPositionSignature = buildPresenceSignature(internalBoard)
 
                         val uci = "${('a' + from.second)}${8 - from.first}${('a' + to.second)}${8 - to.first}"
                         if (wasEnemy) {
@@ -744,21 +745,11 @@ class ChessOverlayService : Service() {
         return SyncResult.NoChange
     }
 
-    private fun buildPresenceSignature(board: Array<CharArray>): String {
-        val sb = StringBuilder(64)
-        for (r in 0..7) {
-            for (c in 0..7) {
-                sb.append(board[r][c])
-            }
-        }
-        return sb.toString()
-    }
-
-    private fun runEngineSuggestion() {
+    private fun runEngineSuggestion(scannedCount: Int = -1) {
         serviceScope.launch {
             val boardCopy = Array(8) { r -> internalBoard[r].clone() }
             val result = withContext(Dispatchers.Default) {
-                chessEngine.analyze(boardCopy, whiteToMove = playerIsWhite, maxDepth = 5)
+                chessEngine.analyze(boardCopy, whiteToMove = playerIsWhite, maxDepth = 4)
             }
 
             if (result.bestMove.length >= 4) {
@@ -769,14 +760,15 @@ class ChessOverlayService : Service() {
                 boardOverlay?.invalidate()
 
                 val sign = if (result.evalCp >= 0) "+" else ""
-                statusText?.text = "💡 Лучший ход: ${result.bestMove} ($sign${result.evalCp / 100f}) ➔ жми [▶️ Ход]"
+                val info = if (scannedCount > 0) "[$scannedCount фиг.] " else ""
+                statusText?.text = "💡 ${info}Ход: ${result.bestMove} ($sign${result.evalCp / 100f}) ➔ жми [▶️ Ход]"
 
                 if (autoPlayEnabled) {
                     delay(300L)
                     executeMoveOnBothBoards(result.bestMove)
                 }
             } else {
-                statusText?.text = "⚠️ Ходов не найдено. Нажми [🔍 Скан]"
+                statusText?.text = "⚠️ Ходов не найдено. Проверь цвет [⬜/⬛] или жми [🔍 Скан]"
             }
         }
     }
@@ -830,9 +822,11 @@ class ChessOverlayService : Service() {
         charArrayOf('R', 'N', 'B', 'Q', 'K', 'B', 'N', 'R')
     )
 
+    // Если нового кадра в ImageReader нет (экран статичен), возвращает последний сохраненный кадр!
     private fun captureScreenBitmap(): Bitmap? {
-        val reader = imageReader ?: return null
-        val image = try { reader.acquireLatestImage() } catch (_: Throwable) { null } ?: return null
+        val reader = imageReader ?: return lastCapturedBitmap
+        val image = try { reader.acquireLatestImage() } catch (_: Throwable) { null }
+        if (image == null) return lastCapturedBitmap
         return try {
             val plane = image.planes[0]
             val buffer = plane.buffer
@@ -842,13 +836,15 @@ class ChessOverlayService : Service() {
             val paddedWidth = screenWidth + rowPadding / pixelStride
             val bmp = Bitmap.createBitmap(paddedWidth, screenHeight, Bitmap.Config.ARGB_8888)
             bmp.copyPixelsFromBuffer(buffer)
-            if (paddedWidth != screenWidth) {
+            val finalBmp = if (paddedWidth != screenWidth) {
                 val cropped = Bitmap.createBitmap(bmp, 0, 0, screenWidth, screenHeight)
                 bmp.recycle()
                 cropped
             } else bmp
+            lastCapturedBitmap = finalBmp
+            finalBmp
         } catch (_: Throwable) {
-            null
+            lastCapturedBitmap
         } finally {
             image.close()
         }
