@@ -140,7 +140,7 @@ class ChessOverlayService : Service() {
         val modeName = if (isChessComMode) "Chess.com" else "Duolingo"
         val notification: Notification = NotificationCompat.Builder(this, channelId)
             .setContentTitle("Chess Bot ($modeName)")
-            .setContentText("Активен (исправлен переворот цветов)")
+            .setContentText("Защита от анимаций съедания активна")
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setOngoing(true)
             .build()
@@ -195,7 +195,7 @@ class ChessOverlayService : Service() {
 
         val modeTitle = if (isChessComMode) "♟️ Chess.com" else "🦉 Duolingo"
         statusText = TextView(this).apply {
-            text = "$modeTitle | Жми [🔍 Скан] или [🔄 Новая]"
+            text = "$modeTitle | Жми [🔍 Скан] после анимации хода"
             setTextColor(Color.rgb(110, 255, 160))
             textSize = 11f
             setPadding(4, 2, 4, 3)
@@ -408,14 +408,15 @@ class ChessOverlayService : Service() {
             boardOverlay?.ponderMoveUci = null
             boardOverlay?.invalidate()
             boardOverlay?.visibility = View.INVISIBLE
-            statusText?.text = "📸 Сканирую..."
-            delay(100L)
+            statusText?.text = "📸 Жду окончания анимации..."
+            // Ждём 140 мс, чтобы анимация съедания/взрыва ферзя в Duolingo полностью завершилась перед снимком
+            delay(140L)
 
             val frame = latestFrameBitmap
             boardOverlay?.visibility = View.VISIBLE
 
             if (frame == null) {
-                statusText?.text = "⚠️ Жду кадр экрана... Нажми [🔍 Скан]"
+                statusText?.text = "⚠️ Жду кадр... Нажми [🔍 Скан]"
                 return@launch
             }
 
@@ -511,7 +512,7 @@ class ChessOverlayService : Service() {
         watcherJob?.cancel()
         watcherJob = serviceScope.launch {
             while (isActive) {
-                delay(500L)
+                delay(600L)
                 if (isMinimized || isExecutingGesture || isEditCellsMode) continue
                 val frame = latestFrameBitmap ?: continue
 

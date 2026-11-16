@@ -97,26 +97,16 @@ object BoardRecognizer {
 
         val result = Array(8) { CharArray(8) { '.' } }
 
-        // Сканируем каждую из 64 клеток экрана (эранные строки sr 0..7, колонки sc 0..7)
         for (sr in 0..7) {
             for (sc in 0..7) {
-                // Вычисляем координаты внутри клетки для замера силуэта
                 val cellX = sc * cellSize
                 val cellY = sr * cellSize
                 val cellScan = analyzeCellPixels(reusablePixels, size, cellX, cellY, cellSize, isChessCom)
 
-                // Строгая привязка по цветам: верхние ряды экрана (sr 0-1) в Duolingo — это соперник, нижние (6-7) — ты!
                 val isActuallyWhite = if (playerIsWhite) (sr >= 4) else (sr <= 3)
 
                 if (cellScan.occupied) {
-                    val ch = when (cellScan.shapeType) {
-                        'p' -> 'p'
-                        'r' -> 'r'
-                        'n' -> 'n'
-                        'b' -> 'b'
-                        'q' -> 'q'
-                        else -> 'k'
-                    }
+                    val ch = cellScan.shapeType
                     result[sr][sc] = if (isActuallyWhite) ch.uppercaseChar() else ch
                 } else {
                     result[sr][sc] = '.'
@@ -124,19 +114,8 @@ object BoardRecognizer {
             }
         }
 
-        // Если это начало партии (много фигур на 0-й и 7-й строках), ставим идеальную классическую расстановку
-        val topCount = (0..7).count { result[0][it] != '.' }
-        val botCount = (0..7).count { result[7][it] != '.' }
-        if (topCount >= 6 && botCount >= 6) {
-            val stdBack = charArrayOf('r', 'n', 'b', 'q', 'k', 'b', 'n', 'r')
-            for (c in 0..7) {
-                result[0][c] = if (playerIsWhite) stdBack[c].lowercaseChar() else stdBack[c].uppercaseChar()
-                result[1][c] = if (playerIsWhite) 'p' else 'P'
-                for (r in 2..5) result[r][c] = '.'
-                result[6][c] = if (playerIsWhite) 'P' else 'p'
-                result[7][c] = if (playerIsWhite) stdBack[c] else stdBack[c].lowercaseChar()
-            }
-        }
+        // Защита от ложных срабатываний анимаций: если в середине партии на пустых клетках вдруг привиделось много ферзей, убираем мусор
+        cleanAnimationArtifacts(result)
 
         return result
     }
@@ -185,7 +164,8 @@ object BoardRecognizer {
                 val dist = sqrt((dr * dr + dg * dg + db * db).toDouble())
                 val lum = (r * 299 + g * 587 + b * 114) / 1000
 
-                if (dist >= 35.0 && lum >= 22) {
+                // Повышенный порог отсечки (38.0), чтобы анимационные вспышки съедания не принимались за фигуры
+                if (dist >= 38.0 && lum >= 20) {
                     fgCount++
                     if (gy < minGy) minGy = gy
                     if (gy > maxGy) maxGy = gy
@@ -201,21 +181,21 @@ object BoardRecognizer {
         }
 
         var baseMass = 0
-        for (gy in 20..28) {
-            for (gx in 6..25) {
+        for (gy in 21..28) {
+            for (gx in 7..24) {
                 val px = (cellX + (gx + 0.5f) * cellSize / N).toInt().coerceIn(0, stride - 1)
                 val py = (cellY + (gy + 0.5f) * cellSize / N).toInt().coerceIn(0, stride - 1)
                 val c = pixels[py * stride + px]
-                if (abs(Color.red(c) - bgR) >= 35) baseMass++
+                if (abs(Color.red(c) - bgR) >= 38) baseMass++
             }
         }
 
         val boxH = maxGy - minGy + 1
-        if (fgCount < 38 || baseMass < 12 || boxH < 8) {
+        // Увеличен минимальный порог плотности (fgCount >= 46), чтобы исключить мерцающие частицы анимации
+        if (fgCount < 46 || baseMass < 15 || boxH < 9) {
             return CellResult(false, '.')
         }
 
-        // Измеряем пропорции силуэта
         val baseStart = (boxH * 0.70f).toInt().coerceIn(0, boxH - 1)
         var baseW = 1
         for (i in baseStart until boxH) {
@@ -235,15 +215,35 @@ object BoardRecognizer {
         val topRatio = headW.toFloat() / baseW.coerceAtLeast(1)
 
         val shape = when {
-            relH < 0.72f && topRatio < 0.70f -> 'p' // Пешка
-            relH >= 0.85f && topRatio >= 0.65f -> 'k' // Король (самый высокий с крестом)
-            relH >= 0.78f && topRatio >= 0.75f -> 'q' // Ферзь (широкая корона)
-            topRatio >= 0.72f -> 'r' // Ладья (башня)
-            relH >= 0.75f && topRatio < 0.65f -> 'b' // Слон
-            else -> 'n' // Конь
+            relH < 0.70f && topRatio < 0.68f -> 'p'
+            relH >= 0.84f && topRatio >= 0.65f -> 'k'
+            relH >= 0.76f && topRatio >= 0.74f -> 'q'
+            topRatio >= 0.70f -> 'r'
+            relH >= 0.73f && topRatio < 0.65f -> 'b'
+            else -> 'n'
         }
 
         return CellResult(true, shape)
+    }
+
+    private fun cleanAnimationArtifacts(grid: Array<CharArray>) {
+        // Если на доске каким-то образом появилось больше 2 королевств каждого цвета — убираем лишние фантомы
+        for (whiteSide in booleanArrayOf(true, false)) {
+            val kChar = if (whiteSide) 'K' else 'k'
+            val kings = mutableListOf<Pair<Int, Int>>()
+            for (r in 0..7) {
+                for (c in 0..7) {
+                    if (grid[r][c] == kChar) kings.add(r to c)
+                }
+            }
+            if (kings.size > 1) {
+                // Оставляем только нижнего/верхнего истинного короля, остальные превращаем в пешек или пустоту
+                for (i in 1 until kings.size) {
+                    val (r, c) = kings[i]
+                    grid[r][c] = if (whiteSide) 'P' else 'p'
+                }
+            }
+        }
     }
 
     private fun sqrt(d: Double): Double = kotlin.math.sqrt(d)
