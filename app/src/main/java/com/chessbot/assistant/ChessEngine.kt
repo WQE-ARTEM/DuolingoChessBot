@@ -31,105 +31,140 @@ class ChessEngine(private val context: Context? = null) {
     private val pieceVal = IntArray(128).apply {
         this['P'.code] = 100; this['p'.code] = 100
         this['N'.code] = 320; this['n'.code] = 320
-        this['B'.code] = 330; this['b'.code] = 330
+        this['B'.code] = 335; this['b'.code] = 335
         this['R'.code] = 500; this['r'.code] = 500
-        this['Q'.code] = 900; this['q'.code] = 900
+        this['Q'.code] = 950; this['q'.code] = 950
         this['K'.code] = 20000; this['k'.code] = 20000
     }
 
+    // Позиционные таблицы (для Белых, r=0 — 8-я горизонталь, r=7 — 1-я горизонталь)
+    private val pawnPst = arrayOf(
+        intArrayOf(0,  0,  0,  0,  0,  0,  0,  0),
+        intArrayOf(50, 50, 50, 50, 50, 50, 50, 50),
+        intArrayOf(12, 12, 24, 34, 34, 24, 12, 12),
+        intArrayOf(6,  6, 14, 28, 28, 14,  6,  6),
+        intArrayOf(0,  0,  4, 24, 24,  4,  0,  0),
+        intArrayOf(4, -4, -8,  0,  0, -8, -4,  4),
+        intArrayOf(4, 10, 10,-20,-20, 10, 10,  4),
+        intArrayOf(0,  0,  0,  0,  0,  0,  0,  0)
+    )
+
+    private val knightPst = arrayOf(
+        intArrayOf(-50,-40,-30,-30,-30,-30,-40,-50),
+        intArrayOf(-40,-20,  0,  4,  4,  0,-20,-40),
+        intArrayOf(-30,  4, 15, 20, 20, 15,  4,-30),
+        intArrayOf(-30,  6, 20, 26, 26, 20,  6,-30),
+        intArrayOf(-30,  4, 20, 26, 26, 20,  4,-30),
+        intArrayOf(-30,  6, 15, 20, 20, 15,  6,-30),
+        intArrayOf(-40,-20,  0,  4,  4,  0,-20,-40),
+        intArrayOf(-50,-40,-30,-30,-30,-30,-40,-50)
+    )
+
+    private val bishopPst = arrayOf(
+        intArrayOf(-20,-10,-10,-10,-10,-10,-10,-20),
+        intArrayOf(-10,  4,  0,  0,  0,  0,  4,-10),
+        intArrayOf(-10,  8, 12, 14, 14, 12,  8,-10),
+        intArrayOf(-10,  4, 14, 16, 16, 14,  4,-10),
+        intArrayOf(-10,  6, 10, 16, 16, 10,  6,-10),
+        intArrayOf(-10, 12, 12, 14, 14, 12, 12,-10),
+        intArrayOf(-10,  8,  0,  0,  0,  0,  8,-10),
+        intArrayOf(-20,-10,-10,-10,-10,-10,-10,-20)
+    )
+
     fun analyze(board: Array<CharArray>, whiteToMove: Boolean, maxDepth: Int = 4): EngineResult {
-        val rootMoves = generateLegalMoves(board, whiteToMove)
+        var rootMoves = generateLegalMoves(board, whiteToMove)
+        // Если на доске в задаче нестандартная расстановка, никогда не зависаем без хода:
+        if (rootMoves.isEmpty()) {
+            rootMoves = generatePseudoMoves(board, whiteToMove)
+        }
         if (rootMoves.isEmpty()) return EngineResult("", "", 0)
 
         var bestMove = rootMoves[0]
         var bestScore = if (whiteToMove) -999999 else 999999
 
-        // 1. Сначала проверяем, есть ли МАТ В 1 ХОД — если есть, возвращаем его мгновенно!
+        // Мгновенная проверка на мат в 1 ход
         for (m in rootMoves) {
-            val cap = board[m.toR][m.toC]
-            val mov = board[m.fromR][m.fromC]
-            board[m.toR][m.toC] = if (m.promo != '.') m.promo else mov
-            board[m.fromR][m.fromC] = '.'
-
+            val undo = makeMove(board, m)
             val enemyLegal = generateLegalMoves(board, !whiteToMove)
             val givesCheck = isKingInCheck(board, !whiteToMove)
-
-            board[m.fromR][m.fromC] = mov
-            board[m.toR][m.toC] = cap
+            undoMove(board, m, undo)
 
             if (enemyLegal.isEmpty() && givesCheck) {
                 return EngineResult(m.toUci(), "", if (whiteToMove) 99000 else -99000)
             }
         }
 
-        // 2. Итеративное углубление Alpha-Beta с проверкой мата и пата на любой глубине
+        // Итеративное углубление с Quiescence Search (проверка всех цепочек взятий)
         for (d in 1..maxDepth) {
             var alpha = -1000000
             var beta = 1000000
-            var currentBest = bestMove
-            var currentBestScore = if (whiteToMove) -999999 else 999999
+            var curBest = bestMove
+            var curScore = if (whiteToMove) -999999 else 999999
 
-            val ordered = rootMoves.sortedByDescending {
-                if (it.toUci() == bestMove.toUci()) 10000000 else it.score
-            }
+            val bestUci = bestMove.toUci()
+            rootMoves.sortByDescending { if (it.toUci() == bestUci) 10000000 else it.score }
 
-            for (m in ordered) {
-                val captured = board[m.toR][m.toC]
-                val moved = board[m.fromR][m.fromC]
-                board[m.toR][m.toC] = if (m.promo != '.') m.promo else moved
-                board[m.fromR][m.fromC] = '.'
+            for (m in rootMoves) {
+                val undo = makeMove(board, m)
+                val sc = alphaBeta(board, d - 1, alpha, beta, !whiteToMove)
+                undoMove(board, m, undo)
 
-                val score = alphaBeta(board, d - 1, alpha, beta, !whiteToMove)
-
-                board[m.fromR][m.fromC] = moved
-                board[m.toR][m.toC] = captured
+                m.score = if (whiteToMove) sc else -sc
 
                 if (whiteToMove) {
-                    if (score > currentBestScore) {
-                        currentBestScore = score
-                        currentBest = m
-                    }
-                    alpha = max(alpha, score)
+                    if (sc > curScore) { curScore = sc; curBest = m }
+                    alpha = max(alpha, sc)
                 } else {
-                    if (score < currentBestScore) {
-                        currentBestScore = score
-                        currentBest = m
-                    }
-                    beta = min(beta, score)
+                    if (sc < curScore) { curScore = sc; curBest = m }
+                    beta = min(beta, sc)
                 }
             }
-            bestMove = currentBest
-            bestScore = currentBestScore
+            bestMove = curBest
+            bestScore = curScore
             if (abs(bestScore) >= 85000) break
         }
 
-        // Вычисляем ожидаемый ответ соперника (ponder)
-        val cap = board[bestMove.toR][bestMove.toC]
-        val mov = board[bestMove.fromR][bestMove.fromC]
-        board[bestMove.toR][bestMove.toC] = if (bestMove.promo != '.') bestMove.promo else mov
-        board[bestMove.fromR][bestMove.fromC] = '.'
-        val replyMoves = generateLegalMoves(board, !whiteToMove)
-        var ponderUci = ""
-        if (replyMoves.isNotEmpty()) {
-            var bestReply = replyMoves[0]
-            var bestReplyEval = if (!whiteToMove) -999999 else 999999
-            for (rm in replyMoves) {
-                val c2 = board[rm.toR][rm.toC]
-                val m2 = board[rm.fromR][rm.fromC]
-                board[rm.toR][rm.toC] = if (rm.promo != '.') rm.promo else m2
-                board[rm.fromR][rm.fromC] = '.'
-                val ev = evaluate(board)
-                board[rm.fromR][rm.fromC] = m2
-                board[rm.toR][rm.toC] = c2
-                if (!whiteToMove && ev > bestReplyEval) { bestReplyEval = ev; bestReply = rm }
-                else if (whiteToMove && ev < bestReplyEval) { bestReplyEval = ev; bestReply = rm }
-            }
-            ponderUci = bestReply.toUci()
-        }
-        board[bestMove.fromR][bestMove.fromC] = mov
-        board[bestMove.toR][bestMove.toC] = cap
+        return EngineResult(bestMove.toUci(), "", bestScore)
+    }
 
-        return EngineResult(bestMove.toUci(), ponderUci, bestScore)
+    private data class UndoState(
+        val movedPiece: Char,
+        val capturedPiece: Char,
+        val rookFromC: Int = -1,
+        val rookToC: Int = -1,
+        val rookPiece: Char = '.'
+    )
+
+    private fun makeMove(board: Array<CharArray>, m: Move): UndoState {
+        val mov = board[m.fromR][m.fromC]
+        val cap = board[m.toR][m.toC]
+        board[m.toR][m.toC] = if (m.promo != '.') m.promo else mov
+        board[m.fromR][m.fromC] = '.'
+
+        // Рокировка
+        if ((mov == 'K' || mov == 'k') && abs(m.toC - m.fromC) == 2) {
+            if (m.toC == 6) {
+                val rP = board[m.toR][7]
+                board[m.toR][5] = rP
+                board[m.toR][7] = '.'
+                return UndoState(mov, cap, 7, 5, rP)
+            } else if (m.toC == 2) {
+                val rP = board[m.toR][0]
+                board[m.toR][3] = rP
+                board[m.toR][0] = '.'
+                return UndoState(mov, cap, 0, 3, rP)
+            }
+        }
+        return UndoState(mov, cap)
+    }
+
+    private fun undoMove(board: Array<CharArray>, m: Move, u: UndoState) {
+        board[m.fromR][m.fromC] = u.movedPiece
+        board[m.toR][m.toC] = u.capturedPiece
+        if (u.rookFromC != -1) {
+            board[m.toR][u.rookFromC] = u.rookPiece
+            board[m.toR][u.rookToC] = '.'
+        }
     }
 
     private fun alphaBeta(
@@ -139,54 +174,90 @@ class ChessEngine(private val context: Context? = null) {
         betaInit: Int,
         whiteToMove: Boolean
     ): Int {
-        val legalMoves = generateLegalMoves(board, whiteToMove)
-        if (legalMoves.isEmpty()) {
+        val legal = generateLegalMoves(board, whiteToMove)
+        if (legal.isEmpty()) {
             return if (isKingInCheck(board, whiteToMove)) {
                 if (whiteToMove) -90000 - depth * 500 else 90000 + depth * 500
-            } else {
-                0 // Пат (ничья)
-            }
+            } else 0
         }
 
-        if (depth <= 0) return evaluate(board)
+        if (depth <= 0) {
+            return quiescence(board, alphaInit, betaInit, whiteToMove, 3)
+        }
 
         var alpha = alphaInit
         var beta = betaInit
 
         if (whiteToMove) {
-            var value = -999999
-            for (m in legalMoves) {
-                val cap = board[m.toR][m.toC]
-                val mov = board[m.fromR][m.fromC]
-                board[m.toR][m.toC] = if (m.promo != '.') m.promo else mov
-                board[m.fromR][m.fromC] = '.'
-
-                value = max(value, alphaBeta(board, depth - 1, alpha, beta, false))
-
-                board[m.fromR][m.fromC] = mov
-                board[m.toR][m.toC] = cap
-
-                alpha = max(alpha, value)
+            var v = -999999
+            for (m in legal) {
+                val u = makeMove(board, m)
+                v = max(v, alphaBeta(board, depth - 1, alpha, beta, false))
+                undoMove(board, m, u)
+                alpha = max(alpha, v)
                 if (alpha >= beta) break
             }
-            return value
+            return v
         } else {
-            var value = 999999
-            for (m in legalMoves) {
-                val cap = board[m.toR][m.toC]
-                val mov = board[m.fromR][m.fromC]
-                board[m.toR][m.toC] = if (m.promo != '.') m.promo else mov
-                board[m.fromR][m.fromC] = '.'
-
-                value = min(value, alphaBeta(board, depth - 1, alpha, beta, true))
-
-                board[m.fromR][m.fromC] = mov
-                board[m.toR][m.toC] = cap
-
-                beta = min(beta, value)
+            var v = 999999
+            for (m in legal) {
+                val u = makeMove(board, m)
+                v = min(v, alphaBeta(board, depth - 1, alpha, beta, true))
+                undoMove(board, m, u)
+                beta = min(beta, v)
                 if (beta <= alpha) break
             }
-            return value
+            return v
+        }
+    }
+
+    // Доигрывание всех форсированных взятий, чтобы бот никогда не подставлял ферзя или фигуры под ответный удар
+    private fun quiescence(
+        board: Array<CharArray>,
+        alphaInit: Int,
+        betaInit: Int,
+        whiteToMove: Boolean,
+        qDepth: Int
+    ): Int {
+        val standPat = evaluate(board)
+        if (qDepth <= 0) return standPat
+
+        var alpha = alphaInit
+        var beta = betaInit
+
+        if (whiteToMove) {
+            if (standPat >= beta) return beta
+            if (standPat > alpha) alpha = standPat
+        } else {
+            if (standPat <= alpha) return alpha
+            if (standPat < beta) beta = standPat
+        }
+
+        val captures = generateLegalCaptures(board, whiteToMove)
+        if (captures.isEmpty()) return standPat
+
+        if (whiteToMove) {
+            var v = standPat
+            for (m in captures) {
+                val u = makeMove(board, m)
+                val score = quiescence(board, alpha, beta, false, qDepth - 1)
+                undoMove(board, m, u)
+                if (score > v) v = score
+                if (v > alpha) alpha = v
+                if (alpha >= beta) break
+            }
+            return v
+        } else {
+            var v = standPat
+            for (m in captures) {
+                val u = makeMove(board, m)
+                val score = quiescence(board, alpha, beta, true, qDepth - 1)
+                undoMove(board, m, u)
+                if (score < v) v = score
+                if (v < beta) beta = v
+                if (beta <= alpha) break
+            }
+            return v
         }
     }
 
@@ -197,17 +268,18 @@ class ChessEngine(private val context: Context? = null) {
                 val p = board[r][c]
                 if (p == '.') continue
                 val isW = p.isUpperCase()
+                val pr = if (isW) r else 7 - r
                 var v = pieceVal[p.code]
 
-                val centerBonus = (3 - abs(3 - c)) * 6 + (3 - abs(3 - r)) * 6
                 when (p.lowercaseChar()) {
-                    'p' -> {
-                        val adv = if (isW) (6 - r) else (r - 1)
-                        v += adv * 15 + centerBonus
+                    'p' -> v += pawnPst[pr][c]
+                    'n' -> v += knightPst[pr][c]
+                    'b' -> v += bishopPst[pr][c]
+                    'r' -> {
+                        if (pr == 1) v += 30
+                        if (c == 3 || c == 4) v += 10
                     }
-                    'n', 'b' -> v += centerBonus * 2
-                    'r' -> v += (if ((isW && r == 1) || (!isW && r == 6)) 35 else 0)
-                    'q' -> v += centerBonus
+                    'q' -> v += (3 - abs(3 - c)) * 4 + (3 - abs(3 - r)) * 4
                 }
                 if (isW) score += v else score -= v
             }
@@ -215,39 +287,53 @@ class ChessEngine(private val context: Context? = null) {
         return score
     }
 
-    fun generateLegalMoves(board: Array<CharArray>, whiteToMove: Boolean): List<Move> {
+    fun generateLegalMoves(board: Array<CharArray>, whiteToMove: Boolean): ArrayList<Move> {
         val pseudo = generatePseudoMoves(board, whiteToMove)
         val legal = ArrayList<Move>(pseudo.size)
         for (m in pseudo) {
-            val cap = board[m.toR][m.toC]
-            val mov = board[m.fromR][m.fromC]
-            board[m.toR][m.toC] = if (m.promo != '.') m.promo else mov
-            board[m.fromR][m.fromC] = '.'
-
+            val u = makeMove(board, m)
             val inCheck = isKingInCheck(board, whiteToMove)
-
-            board[m.fromR][m.fromC] = mov
-            board[m.toR][m.toC] = cap
-
+            undoMove(board, m, u)
             if (!inCheck) legal.add(m)
         }
         return legal
     }
 
-    private fun isKingInCheck(board: Array<CharArray>, whiteKing: Boolean): Boolean {
+    private fun generateLegalCaptures(board: Array<CharArray>, whiteToMove: Boolean): ArrayList<Move> {
+        val pseudo = generatePseudoMoves(board, whiteToMove, capturesOnly = true)
+        val legal = ArrayList<Move>(pseudo.size)
+        for (m in pseudo) {
+            val u = makeMove(board, m)
+            val inCheck = isKingInCheck(board, whiteToMove)
+            undoMove(board, m, u)
+            if (!inCheck) legal.add(m)
+        }
+        return legal
+    }
+
+    fun isKingInCheck(board: Array<CharArray>, whiteKing: Boolean): Boolean {
         val kChar = if (whiteKing) 'K' else 'k'
         var kr = -1; var kc = -1
         for (r in 0..7) {
             for (c in 0..7) {
                 if (board[r][c] == kChar) { kr = r; kc = c; break }
             }
+            if (kr != -1) break
         }
         if (kr == -1) return false
         val enemyMoves = generatePseudoMoves(board, !whiteKing)
-        return enemyMoves.any { it.toR == kr && it.toC == kc }
+        for (i in 0 until enemyMoves.size) {
+            val em = enemyMoves[i]
+            if (em.toR == kr && em.toC == kc) return true
+        }
+        return false
     }
 
-    private fun generatePseudoMoves(board: Array<CharArray>, whiteToMove: Boolean): List<Move> {
+    fun generatePseudoMoves(
+        board: Array<CharArray>,
+        whiteToMove: Boolean,
+        capturesOnly: Boolean = false
+    ): ArrayList<Move> {
         val moves = ArrayList<Move>(48)
         for (r in 0..7) {
             for (c in 0..7) {
@@ -261,12 +347,12 @@ class ChessEngine(private val context: Context? = null) {
                         val promoChar = if (whiteToMove) 'Q' else 'q'
                         val nr = r + dir
                         if (nr in 0..7) {
-                            if (board[nr][c] == '.') {
+                            if (!capturesOnly && board[nr][c] == '.') {
                                 val pr = if (nr == promoRank) promoChar else '.'
-                                moves.add(Move(r, c, nr, c, pr, if (pr != '.') 900 else 10))
+                                moves.add(Move(r, c, nr, c, pr, if (pr != '.') 900 else 12))
                                 val nnr = r + dir * 2
                                 if (r == startRank && nnr in 0..7 && board[nnr][c] == '.') {
-                                    moves.add(Move(r, c, nnr, c, '.', 15))
+                                    moves.add(Move(r, c, nnr, c, '.', 18))
                                 }
                             }
                             for (dc in intArrayOf(-1, 1)) {
@@ -288,9 +374,10 @@ class ChessEngine(private val context: Context? = null) {
                             val nr = r + dr[i]; val nc = c + dc[i]
                             if (nr in 0..7 && nc in 0..7) {
                                 val t = board[nr][nc]
-                                if (t == '.' || t.isUpperCase() != whiteToMove) {
-                                    val sc = if (t != '.') pieceVal[t.code] * 10 - 320 else 20
-                                    moves.add(Move(r, c, nr, nc, '.', sc))
+                                if (t == '.') {
+                                    if (!capturesOnly) moves.add(Move(r, c, nr, nc, '.', 22))
+                                } else if (t.isUpperCase() != whiteToMove) {
+                                    moves.add(Move(r, c, nr, nc, '.', pieceVal[t.code] * 10 - 320))
                                 }
                             }
                         }
@@ -302,10 +389,24 @@ class ChessEngine(private val context: Context? = null) {
                                 val nr = r + dr; val nc = c + dc
                                 if (nr in 0..7 && nc in 0..7) {
                                     val t = board[nr][nc]
-                                    if (t == '.' || t.isUpperCase() != whiteToMove) {
-                                        val sc = if (t != '.') pieceVal[t.code] * 10 - 100 else 5
-                                        moves.add(Move(r, c, nr, nc, '.', sc))
+                                    if (t == '.') {
+                                        if (!capturesOnly) moves.add(Move(r, c, nr, nc, '.', 5))
+                                    } else if (t.isUpperCase() != whiteToMove) {
+                                        moves.add(Move(r, c, nr, nc, '.', pieceVal[t.code] * 10 - 100))
                                     }
+                                }
+                            }
+                        }
+                        // Короткая и длинная рокировка
+                        if (!capturesOnly) {
+                            val homeR = if (whiteToMove) 7 else 0
+                            val rChar = if (whiteToMove) 'R' else 'r'
+                            if (r == homeR && c == 4) {
+                                if (board[homeR][5] == '.' && board[homeR][6] == '.' && board[homeR][7] == rChar) {
+                                    moves.add(Move(homeR, 4, homeR, 6, '.', 40))
+                                }
+                                if (board[homeR][3] == '.' && board[homeR][2] == '.' && board[homeR][1] == '.' && board[homeR][0] == rChar) {
+                                    moves.add(Move(homeR, 4, homeR, 2, '.', 35))
                                 }
                             }
                         }
@@ -321,7 +422,7 @@ class ChessEngine(private val context: Context? = null) {
                             while (nr in 0..7 && nc in 0..7) {
                                 val t = board[nr][nc]
                                 if (t == '.') {
-                                    moves.add(Move(r, c, nr, nc, '.', 12))
+                                    if (!capturesOnly) moves.add(Move(r, c, nr, nc, '.', 14))
                                 } else {
                                     if (t.isUpperCase() != whiteToMove) {
                                         moves.add(Move(r, c, nr, nc, '.', pieceVal[t.code] * 10 - pieceVal[p.code]))

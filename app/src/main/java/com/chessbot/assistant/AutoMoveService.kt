@@ -6,7 +6,6 @@ import android.graphics.Path
 import android.os.Handler
 import android.os.Looper
 import android.view.accessibility.AccessibilityEvent
-import kotlin.random.Random
 
 class AutoMoveService : AccessibilityService() {
 
@@ -23,11 +22,10 @@ class AutoMoveService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
-
     override fun onInterrupt() {}
 
     override fun onDestroy() {
-        instance = null
+        if (instance === this) instance = null
         super.onDestroy()
     }
 
@@ -37,10 +35,10 @@ class AutoMoveService : AccessibilityService() {
         boardTop: Float,
         boardSize: Float,
         whiteAtBottom: Boolean,
-        onComplete: () -> Unit
+        onComplete: (() -> Unit)? = null
     ) {
         if (uciMove.length < 4) {
-            onComplete()
+            onComplete?.invoke()
             return
         }
 
@@ -50,50 +48,49 @@ class AutoMoveService : AccessibilityService() {
         val toFile = uciMove[2] - 'a'
         val toRank = uciMove[3] - '1'
 
-        val startCol = if (whiteAtBottom) fromFile else 7 - fromFile
-        val startRow = if (whiteAtBottom) 7 - fromRank else fromRank
-        val endCol = if (whiteAtBottom) toFile else 7 - toFile
-        val endRow = if (whiteAtBottom) 7 - toRank else toRank
+        val sc1 = if (whiteAtBottom) fromFile else 7 - fromFile
+        val sr1 = if (whiteAtBottom) 7 - fromRank else fromRank
+        val sc2 = if (whiteAtBottom) toFile else 7 - toFile
+        val sr2 = if (whiteAtBottom) 7 - toRank else toRank
 
-        val jitterX1 = Random.nextInt(-5, 6).toFloat()
-        val jitterY1 = Random.nextInt(-5, 6).toFloat()
-        val jitterX2 = Random.nextInt(-5, 6).toFloat()
-        val jitterY2 = Random.nextInt(-5, 6).toFloat()
+        val x1 = boardLeft + (sc1 + 0.5f) * cellSize
+        val y1 = boardTop + (sr1 + 0.5f) * cellSize
+        val x2 = boardLeft + (sc2 + 0.5f) * cellSize
+        val y2 = boardTop + (sr2 + 0.5f) * cellSize
 
-        val startX = (boardLeft + (startCol + 0.5f) * cellSize + jitterX1).coerceAtLeast(1f)
-        val startY = (boardTop + (startRow + 0.5f) * cellSize + jitterY1).coerceAtLeast(1f)
-        val endX = (boardLeft + (endCol + 0.5f) * cellSize + jitterX2).coerceAtLeast(1f)
-        val endY = (boardTop + (endRow + 0.5f) * cellSize + jitterY2).coerceAtLeast(1f)
-
-        dispatchTap(startX, startY, 65L) {
+        // 1-й тап: выбираем фигуру
+        dispatchTap(x1, y1, 45L) {
+            // 2-й тап через 115 мс: ставим фигуру на целевую клетку
             handler.postDelayed({
-                dispatchTap(endX, endY, 65L) {
-                    if (uciMove.length == 5) {
+                dispatchTap(x2, y2, 45L) {
+                    // Если это превращение пешки (5 символов, например e7e8q) — тапаем ещё раз для выбора Ферзя
+                    if (uciMove.length >= 5) {
                         handler.postDelayed({
-                            dispatchTap(endX, endY, 65L) { onComplete() }
-                        }, 320L)
+                            dispatchTap(x2, y2, 45L) { onComplete?.invoke() }
+                        }, 240L)
                     } else {
-                        onComplete()
+                        onComplete?.invoke()
                     }
                 }
-            }, 170L)
+            }, 115L)
         }
     }
 
-    fun tapContinueButton(screenWidth: Int, screenHeight: Int, onComplete: () -> Unit) {
-        val x = screenWidth * 0.60f + Random.nextInt(-10, 11)
-        val y = screenHeight * 0.91f + Random.nextInt(-6, 7)
-        dispatchTap(x, y, 70L, onComplete)
-    }
-
     private fun dispatchTap(x: Float, y: Float, durationMs: Long, onDone: () -> Unit) {
-        val path = Path().apply { moveTo(x, y) }
-        val stroke = GestureDescription.StrokeDescription(path, 0L, durationMs)
-        val gesture = GestureDescription.Builder().addStroke(stroke).build()
-        val dispatched = dispatchGesture(gesture, object : GestureResultCallback() {
-            override fun onCompleted(gestureDescription: GestureDescription?) { onDone() }
-            override fun onCancelled(gestureDescription: GestureDescription?) { onDone() }
-        }, null)
-        if (!dispatched) onDone()
+        try {
+            val path = Path().apply { moveTo(x, y) }
+            val stroke = GestureDescription.StrokeDescription(path, 0L, durationMs)
+            val gesture = GestureDescription.Builder().addStroke(stroke).build()
+            dispatchGesture(gesture, object : GestureResultCallback() {
+                override fun onCompleted(gestureDescription: GestureDescription?) {
+                    handler.post { onDone() }
+                }
+                override fun onCancelled(gestureDescription: GestureDescription?) {
+                    handler.post { onDone() }
+                }
+            }, null)
+        } catch (_: Throwable) {
+            onDone()
+        }
     }
 }
