@@ -5,86 +5,83 @@ import android.graphics.Color
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
-import kotlin.math.sqrt
 
 object BoardRecognizer {
 
     private var reusablePixels = IntArray(0)
-    private val bgRList = IntArray(8)
-    private val bgGList = IntArray(8)
-    private val bgBList = IntArray(8)
+    private val bgRList = IntArray(6)
+    private val bgGList = IntArray(6)
+    private val bgBList = IntArray(6)
 
-    // Находит точный Y верхнего края доски по шахматному чередованию в центральных рядах (2..5)
+    // Ищет точный верхний край доски ТОЛЬКО в реальной зоне доски (0.310 .. 0.372 высоты экрана)
+    // Никогда не запрыгивает на лицо Оскара или облачко диалога!
     fun findBoardTopY(bitmap: Bitmap, expectedTopY: Int, isChessCom: Boolean): Int {
         val w = bitmap.width
         val h = bitmap.height
         val cellW = w / 8
-        val minY = (h * 0.22f).toInt().coerceAtLeast(10)
-        val maxY = (h * 0.48f).toInt().coerceAtMost(h - w - 10)
+        // Строгие границы: доска физически всегда начинается между 31.0% и 37.2% высоты экрана
+        val minY = (h * 0.310f).toInt().coerceAtLeast(10)
+        val maxY = (h * 0.372f).toInt().coerceAtMost(h - w - 10)
 
-        var bestY = expectedTopY
-        var bestScore = -999
+        var bestY = expectedTopY.coerceIn(minY, maxY)
+        var bestScore = -9999
 
-        // Проверяем центральные ряды доски (ряды 2, 3, 4, 5 — там почти нет фигур и виден чистый шахматный узор)
-        for (y in minY..maxY step 3) {
+        for (y in minY..maxY step 2) {
             var score = 0
+            // Проверяем шахматный паттерн: в каждом ряду (2, 3, 4, 5) четные клетки светлее нечетных на четных рядах и наоборот
             for (r in 2..5) {
-                val sampleY = y + r * cellW + (cellW * 0.50f).toInt()
-                if (sampleY >= h - 10) continue
-                var prevLum = -1
+                val sy = y + r * cellW + (cellW * 0.42f).toInt()
+                if (sy >= h - 8) continue
+                var lightSum = 0
+                var darkSum = 0
+                var validRow = true
+
                 for (c in 0..7) {
-                    val sampleX = c * cellW + (cellW * 0.14f).toInt()
-                    val p = bitmap.getPixel(sampleX.coerceIn(0, w - 1), sampleY.coerceIn(0, h - 1))
+                    val sx = c * cellW + (cellW * 0.85f).toInt()
+                    val p = bitmap.getPixel(sx.coerceIn(0, w - 1), sy)
                     val pr = Color.red(p); val pg = Color.green(p); val pb = Color.blue(p)
                     val lum = (pr * 299 + pg * 587 + pb * 114) / 1000
 
-                    if (!isChessCom && (lum !in 16..92 || pr > pb + 12)) {
-                        score -= 6
+                    if (!isChessCom && (lum !in 16..88 || pr > pb + 12)) {
+                        validRow = false
+                        break
                     }
-                    if (prevLum != -1) {
-                        val diff = abs(lum - prevLum)
-                        if (isChessCom) {
-                            if (diff in 22..165) score += 4 else score -= 3
-                        } else {
-                            if (diff in 8..45 && lum in 16..92) score += 4 else score -= 4
-                        }
-                    }
-                    prevLum = lum
+                    if ((r + c) % 2 == 0) lightSum += lum else darkSum += lum
+                }
+
+                if (!validRow) {
+                    score -= 30
+                } else {
+                    val avgDiff = (lightSum - darkSum) / 4
+                    if (isChessCom && avgDiff in 20..160) score += 25
+                    else if (!isChessCom && avgDiff in 8..42) score += 25
+                    else score -= 15
                 }
             }
+
+            // Дополнительный бонус за чёткую верхнюю границу над 0-м рядом и нижнюю границу под 7-м рядом
+            val aboveY = (y - 6).coerceAtLeast(0)
+            val belowY = (y + w + 6).coerceAtMost(h - 1)
+            val pAbove0 = bitmap.getPixel((cellW * 0.5f).toInt(), aboveY)
+            val pAbove1 = bitmap.getPixel(cellW + (cellW * 0.5f).toInt(), aboveY)
+            val pBelow0 = bitmap.getPixel((cellW * 0.5f).toInt(), belowY)
+            val pBelow1 = bitmap.getPixel(cellW + (cellW * 0.5f).toInt(), belowY)
+
+            val diffAbove = abs(Color.red(pAbove0) - Color.red(pAbove1)) + abs(Color.blue(pAbove0) - Color.blue(pAbove1))
+            val diffBelow = abs(Color.red(pBelow0) - Color.red(pBelow1)) + abs(Color.blue(pBelow0) - Color.blue(pBelow1))
+
+            if (diffAbove <= 8) score += 12
+            if (diffBelow <= 8) score += 18
+
             if (score > bestScore) {
                 bestScore = score
                 bestY = y
             }
         }
 
-        if (bestScore < 20) return expectedTopY
-
-        // Доводка с точностью до 2 пикселей по верхней кромке 0-го ряда
-        var exactY = bestY
-        for (dy in -18..18 step 2) {
-            val testY = (bestY + dy).coerceIn(minY, maxY)
-            val p0 = bitmap.getPixel((cellW * 0.14f).toInt(), testY + 4)
-            val p1 = bitmap.getPixel(cellW + (cellW * 0.14f).toInt(), testY + 4)
-            val above0 = bitmap.getPixel((cellW * 0.14f).toInt(), (testY - 4).coerceAtLeast(0))
-            val above1 = bitmap.getPixel(cellW + (cellW * 0.14f).toInt(), (testY - 4).coerceAtLeast(0))
-
-            val l0 = (Color.red(p0) * 299 + Color.green(p0) * 587 + Color.blue(p0) * 114) / 1000
-            val l1 = (Color.red(p1) * 299 + Color.green(p1) * 587 + Color.blue(p1) * 114) / 1000
-            val la0 = (Color.red(above0) * 299 + Color.green(above0) * 587 + Color.blue(above0) * 114) / 1000
-            val la1 = (Color.red(above1) * 299 + Color.green(above1) * 587 + Color.blue(above1) * 114) / 1000
-
-            val insideAlternates = if (isChessCom) abs(l0 - l1) >= 24 else (abs(l0 - l1) in 8..45 && l0 in 16..92)
-            val outsideFlat = abs(la0 - la1) <= 6
-            if (insideAlternates && outsideFlat) {
-                exactY = testY
-                break
-            }
-        }
-        return exactY
+        return if (bestScore >= 50) bestY else expectedTopY.coerceIn(minY, maxY)
     }
 
-    // Возвращает матрицу присутствия 'W' (белая), 'B' (чёрная), '.' (пусто) в ЭКРАННЫХ координатах [sr][sc]
     @Synchronized
     fun scanScreenPresence(
         bitmap: Bitmap,
@@ -116,7 +113,6 @@ object BoardRecognizer {
         return presence
     }
 
-    // Автоматически определяет, играет ли пользователь Белыми (внизу экрана) или Чёрными (внизу экрана)
     fun detectPlayerColorFromPresence(screenPresence: Array<CharArray>, currentWhiteAtBottom: Boolean): Boolean {
         var bottomW = 0; var bottomB = 0
         var topW = 0; var topB = 0
@@ -137,13 +133,15 @@ object BoardRecognizer {
         return currentWhiteAtBottom
     }
 
+    // Точки фона по краям в нижней половине клетки (вдали от левого верхнего бейджа и от фигуры в центре)
     private val bgPoints = arrayOf(
-        2 to 10, 2 to 15, 2 to 21,
-        29 to 10, 29 to 15, 29 to 21,
-        8 to 29, 23 to 29
+        2 to 15, 2 to 23,
+        29 to 15, 29 to 23,
+        6 to 29, 25 to 29
     )
 
-    // Безошибочно отличает Белую фигуру ('W'), Чёрную фигуру ('B') и Пустую клетку ('.')
+    // Сканирует ТОЛЬКО нижнюю центральную часть клетки (gx 8..23, gy 13..27), где находится массивное основание фигуры!
+    // Левый верхний угол с бейджем (gx 0..11, gy 0..9) никогда не попадает в скан!
     private fun detectCellColor(
         pixels: IntArray,
         stride: Int,
@@ -153,7 +151,7 @@ object BoardRecognizer {
         isChessCom: Boolean
     ): Char {
         val N = 32
-        for (i in 0 until 8) {
+        for (i in 0 until 6) {
             val (gx, gy) = bgPoints[i]
             val px = (cellX + (gx + 0.5f) * cellSize / N).toInt().coerceIn(0, stride - 1)
             val py = (cellY + (gy + 0.5f) * cellSize / N).toInt().coerceIn(0, stride - 1)
@@ -163,28 +161,23 @@ object BoardRecognizer {
             bgBList[i] = Color.blue(c)
         }
         bgRList.sort(); bgGList.sort(); bgBList.sort()
-        val bgR = bgRList[4]; val bgG = bgGList[4]; val bgB = bgBList[4]
+        val bgR = bgRList[3]; val bgG = bgGList[3]; val bgB = bgBList[3]
         val bgLum = (bgR * 299 + bgG * 587 + bgB * 114) / 1000
 
         var fgTotal = 0
         var baseFg = 0
-        var midFg = 0
         var whiteCoreVotes = 0
         var blackCoreVotes = 0
 
-        for (gy in 5..27) {
-            for (gx in 6..25) {
-                // Игнорируем правый верхний уголок с мини-буквой
-                if (gx >= 20 && gy <= 9) continue
-
+        for (gy in 13..27) {
+            for (gx in 8..23) {
                 val px = (cellX + (gx + 0.5f) * cellSize / N).toInt().coerceIn(0, stride - 1)
                 val py = (cellY + (gy + 0.5f) * cellSize / N).toInt().coerceIn(0, stride - 1)
                 val c = pixels[py * stride + px]
                 val r = Color.red(c); val g = Color.green(c); val b = Color.blue(c)
 
-                // Игнорируем ярко-зелёный цвет нашей стрелки и голубой цвет сетки
-                if (g > 205 && g > r + 80 && b < 120) continue
-                if (b > 205 && g > 190 && r < 45) continue
+                // Игнорируем ярко-зелёный цвет нашей стрелки
+                if (g > 200 && g > r + 80 && b < 130) continue
 
                 val dr = r - bgR; val dg = g - bgG; val db = b - bgB
                 val distSq = dr * dr + dg * dg + db * db
@@ -201,8 +194,7 @@ object BoardRecognizer {
                         else if (lum in 35..112) blackCoreVotes++
                     }
                 } else {
-                    // Duolingo: белые фигуры имеют ярко-белое тело (lum >= 180), чёрные — тёмно-синее тело (lum 50..125) с голубым контуром
-                    if (distSq >= 900 && lum >= bgLum + 16) {
+                    if (distSq >= 950 && lum >= bgLum + 18) {
                         isFg = true
                         if (lum >= 182 && r >= 155) {
                             whiteCoreVotes++
@@ -214,23 +206,20 @@ object BoardRecognizer {
 
                 if (isFg) {
                     fgTotal++
-                    if (gy in 10..19) midFg++
-                    if (gy in 20..27) baseFg++
+                    if (gy >= 20) baseFg++
                 }
             }
         }
 
-        // У настоящей фигуры обязательно есть и широкое основание снизу (baseFg >= 14), и тело посередине (midFg >= 12)
-        if (fgTotal < 38 || baseFg < 14 || midFg < 12) return '.'
+        if (fgTotal < 28 || baseFg < 12) return '.'
 
         return if (isChessCom) {
-            if (whiteCoreVotes >= 16 && whiteCoreVotes >= blackCoreVotes * 0.42f) 'W' else 'B'
+            if (whiteCoreVotes >= 12 && whiteCoreVotes >= blackCoreVotes * 0.42f) 'W' else 'B'
         } else {
-            if (whiteCoreVotes >= 14 && whiteCoreVotes >= fgTotal * 0.25f) 'W' else 'B'
+            if (whiteCoreVotes >= 10 && whiteCoreVotes >= fgTotal * 0.25f) 'W' else 'B'
         }
     }
 
-    // Реконструкция фигур для головоломок или подключения в середине уже идущей партии
     @Synchronized
     fun reconstructBoardFromPresence(
         bitmap: Bitmap,
@@ -245,7 +234,6 @@ object BoardRecognizer {
 
         val bp = toBoardPresence(screenPres, whiteAtBottom)
 
-        // 1. Проверяем старт новой партии (0 ходов или 1 ход Белых, когда мы играем Чёрными!)
         val openingBoard = tryDetectOpeningBoard(bp)
         if (openingBoard != null) return openingBoard
 
@@ -265,21 +253,18 @@ object BoardRecognizer {
                 }
                 val wantWhite = (pColor == 'W')
 
-                // Если в памяти на этой клетке уже стояла фигура того же цвета — СОХРАНЯЕМ ЕЁ ТИП!
                 val prevP = previousBoard?.get(r)?.get(c) ?: '.'
                 if (prevP != '.' && prevP.isUpperCase() == wantWhite) {
                     result[r][c] = prevP
                     continue
                 }
 
-                // Если фигура стоит на своем родном стартовом месте (1, 2, 7, 8 горизонтали) — берем стартовый тип
                 val initP = stdInit[r][c]
                 if (initP != '.' && initP.isUpperCase() == wantWhite) {
                     result[r][c] = initP
                     continue
                 }
 
-                // Иначе оцениваем силуэт для новой фигуры в головоломке
                 val sr = if (whiteAtBottom) r else 7 - r
                 val sc = if (whiteAtBottom) c else 7 - c
                 val guessed = classifyPuzzleSilhouette(reusablePixels, size, sc * cellSize, sr * cellSize, cellSize, r)
@@ -303,7 +288,6 @@ object BoardRecognizer {
         return bp
     }
 
-    // Распознает как чистую начальную доску (0 ходов), так и начальную доску после 1-го хода Белых (когда мы играем Чёрными!)
     fun tryDetectOpeningBoard(bp: Array<CharArray>): Array<CharArray>? {
         var blackHomeCount = 0
         var whiteHomeCount = 0
@@ -328,12 +312,10 @@ object BoardRecognizer {
             }
         }
 
-        // Случай А: 0 ходов (все 16 белых и 16 чёрных на старте)
         if (blackHomeCount == 16 && whiteHomeCount == 16 && midW == 0 && midB == 0) {
             return createInitialBoard()
         }
 
-        // Случай Б: Белые сделали 1-й ход (например c2-c4, e2-e4, d2-d4, g1-f3), все 16 чёрных на месте
         if (blackHomeCount == 16 && whiteHomeCount == 15 && midW == 1 && midB == 0 &&
             missingWhiteHome != null && arrivedWhiteMid != null
         ) {
@@ -345,7 +327,6 @@ object BoardRecognizer {
             return board
         }
 
-        // Случай В: Белые сделали 1-й ход и Чёрные сделали 1-й ответный ход
         if (blackHomeCount == 15 && whiteHomeCount == 15 && midW == 1 && midB == 1 &&
             missingWhiteHome != null && arrivedWhiteMid != null &&
             missingBlackHome != null && arrivedBlackMid != null
@@ -370,14 +351,14 @@ object BoardRecognizer {
         boardRow: Int
     ): Char {
         val N = 32
-        val bgR = Color.red(pixels[(cellY + 4).toInt().coerceIn(0, stride - 1) * stride + (cellX + 4).toInt().coerceIn(0, stride - 1)])
+        val bgR = Color.red(pixels[(cellY + (24 * cellSize / N)).toInt().coerceIn(0, stride - 1) * stride + (cellX + 4).toInt().coerceIn(0, stride - 1)])
         var minGy = N; var maxGy = -1
         val widths = IntArray(N)
 
         for (gy in 3..28) {
             var l = N; var r = -1
-            for (gx in 5..26) {
-                if (gx >= 20 && gy <= 9) continue
+            for (gx in 6..26) {
+                if (gx <= 11 && gy <= 9) continue // пропускаем левый верхний бейдж
                 val px = (cellX + (gx + 0.5f) * cellSize / N).toInt().coerceIn(0, stride - 1)
                 val py = (cellY + (gy + 0.5f) * cellSize / N).toInt().coerceIn(0, stride - 1)
                 val c = pixels[py * stride + px]

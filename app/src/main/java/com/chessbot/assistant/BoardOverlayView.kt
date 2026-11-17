@@ -3,7 +3,6 @@ package com.chessbot.assistant
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.DashPathEffect
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RectF
@@ -33,82 +32,51 @@ class BoardOverlayView(context: Context) : View(context) {
 
     private val badgeRect = RectF()
 
+    // Тонкая фиолетово-золотая сетка (не пересекается по спектру с голубыми фигурами Duolingo)
     private val gridPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(130, 0, 229, 255)
+        color = Color.argb(110, 255, 200, 0)
         style = Paint.Style.STROKE
-        strokeWidth = 2f
+        strokeWidth = 1.5f
     }
 
     private val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(230, 0, 255, 160)
+        color = Color.argb(220, 46, 255, 120)
         style = Paint.Style.STROKE
-        strokeWidth = 4.5f
-    }
-
-    private val selectedPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(130, 255, 215, 0)
-        style = Paint.Style.STROKE
-        strokeWidth = 8f
-    }
-
-    private val lastMovePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(110, 0, 200, 255)
-        style = Paint.Style.STROKE
-        strokeWidth = 6f
+        strokeWidth = 4f
     }
 
     private val whiteBadgeBg = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(235, 245, 250, 255)
+        color = Color.argb(230, 250, 250, 240)
         style = Paint.Style.FILL
     }
 
     private val blackBadgeBg = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(235, 20, 28, 36)
+        color = Color.argb(230, 28, 22, 38)
         style = Paint.Style.FILL
     }
 
-    private val badgeStrokeWhite = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.rgb(20, 30, 40)
+    private val badgeStroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.rgb(255, 195, 0)
         style = Paint.Style.STROKE
-        strokeWidth = 2.5f
-    }
-
-    private val badgeStrokeBlack = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.rgb(100, 210, 255)
-        style = Paint.Style.STROKE
-        strokeWidth = 2.5f
+        strokeWidth = 2f
     }
 
     private val pieceTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        textSize = 26f
+        textSize = 22f
         isFakeBoldText = true
         textAlign = Paint.Align.CENTER
     }
 
-    private val coordPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(220, 255, 255, 120)
-        textSize = 20f
-        isFakeBoldText = true
-        setShadowLayer(3f, 0f, 0f, Color.BLACK)
-    }
-
     private val bestArrowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(240, 46, 255, 85)
+        color = Color.argb(235, 46, 255, 85)
         style = Paint.Style.STROKE
-        strokeWidth = 12f
+        strokeWidth = 11f
         strokeCap = Paint.Cap.ROUND
     }
 
     private val bestHeadPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(240, 46, 255, 85)
+        color = Color.argb(235, 46, 255, 85)
         style = Paint.Style.FILL
-    }
-
-    private val ponderArrowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(180, 255, 165, 0)
-        style = Paint.Style.STROKE
-        strokeWidth = 7f
-        pathEffect = DashPathEffect(floatArrayOf(16f, 12f), 0f)
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -121,10 +89,8 @@ class BoardOverlayView(context: Context) : View(context) {
                 val cellSize = w / 8f
                 val screenCol = (x / cellSize).toInt().coerceIn(0, 7)
                 val screenRow = (y / cellSize).toInt().coerceIn(0, 7)
-
                 val boardRow = if (whiteAtBottom) screenRow else 7 - screenRow
                 val boardCol = if (whiteAtBottom) screenCol else 7 - screenCol
-
                 onBoardCellClick?.invoke(boardRow, boardCol)
                 return true
             }
@@ -146,16 +112,7 @@ class BoardOverlayView(context: Context) : View(context) {
                 canvas.drawLine(0f, off, size, off, gridPaint)
             }
 
-            lastMovedCells?.let { (from, to) ->
-                drawCellRect(canvas, from.first, from.second, cellSize, lastMovePaint)
-                drawCellRect(canvas, to.first, to.second, cellSize, lastMovePaint)
-            }
-
-            selectedBoardCell?.let { (r, c) ->
-                drawCellRect(canvas, r, c, cellSize, selectedPaint)
-            }
-
-            // Компактный угловой маркер фигуры в правом верхнем углу клетки — НЕ закрывает саму фигуру!
+            // Компактная метка строго в ЛЕВОМ ВЕРХНЕМ уголке (0..26% клетки) — центр и низ фигуры на 100% свободны!
             detectedBoard?.let { grid ->
                 for (r in 0..7) {
                     for (c in 0..7) {
@@ -165,21 +122,20 @@ class BoardOverlayView(context: Context) : View(context) {
                         val sc = if (whiteAtBottom) c else 7 - c
                         val sr = if (whiteAtBottom) r else 7 - r
 
-                        val bw = cellSize * 0.42f
-                        val bh = cellSize * 0.28f
-                        val right = (sc + 1) * cellSize - 3f
-                        val top = sr * cellSize + 3f
-                        badgeRect.set(right - bw, top, right, top + bh)
+                        val bw = cellSize * 0.34f
+                        val bh = cellSize * 0.24f
+                        val left = sc * cellSize + 2f
+                        val top = sr * cellSize + 2f
+                        badgeRect.set(left, top, left + bw, top + bh)
 
                         val isW = p.isUpperCase()
-                        canvas.drawRoundRect(badgeRect, 8f, 8f, if (isW) whiteBadgeBg else blackBadgeBg)
-                        canvas.drawRoundRect(badgeRect, 8f, 8f, if (isW) badgeStrokeWhite else badgeStrokeBlack)
+                        canvas.drawRoundRect(badgeRect, 6f, 6f, if (isW) whiteBadgeBg else blackBadgeBg)
+                        canvas.drawRoundRect(badgeRect, 6f, 6f, badgeStroke)
 
-                        pieceTextPaint.color = if (isW) Color.rgb(15, 25, 35) else Color.rgb(235, 245, 255)
-                        pieceTextPaint.textSize = cellSize * 0.20f
-                        val label = getPieceSymbolAndLetter(p)
+                        pieceTextPaint.color = if (isW) Color.rgb(15, 20, 30) else Color.rgb(255, 230, 130)
+                        pieceTextPaint.textSize = cellSize * 0.17f
                         canvas.drawText(
-                            label,
+                            p.toString(),
                             badgeRect.centerX(),
                             badgeRect.centerY() + pieceTextPaint.textSize * 0.36f,
                             pieceTextPaint
@@ -187,53 +143,14 @@ class BoardOverlayView(context: Context) : View(context) {
                     }
                 }
             }
-
-            for (i in 0..7) {
-                val fileChar = if (whiteAtBottom) ('a' + i) else ('h' - i)
-                val rankChar = if (whiteAtBottom) ('8' - i) else ('1' + i)
-                canvas.drawText(
-                    fileChar.toString(),
-                    i * cellSize + cellSize - 18f,
-                    size - 5f,
-                    coordPaint
-                )
-                canvas.drawText(
-                    rankChar.toString(),
-                    4f,
-                    i * cellSize + 20f,
-                    coordPaint
-                )
-            }
         }
 
-        ponderMoveUci?.let { uci ->
-            if (uci.length >= 4) drawMoveArrow(canvas, uci, cellSize, isBest = false)
-        }
         bestMoveUci?.let { uci ->
-            if (uci.length >= 4) drawMoveArrow(canvas, uci, cellSize, isBest = true)
+            if (uci.length >= 4) drawMoveArrow(canvas, uci, cellSize)
         }
     }
 
-    private fun drawCellRect(canvas: Canvas, boardR: Int, boardC: Int, cellSize: Float, paint: Paint) {
-        val sc = if (whiteAtBottom) boardC else 7 - boardC
-        val sr = if (whiteAtBottom) boardR else 7 - boardR
-        val pad = 4f
-        canvas.drawRect(
-            sc * cellSize + pad,
-            sr * cellSize + pad,
-            (sc + 1) * cellSize - pad,
-            (sr + 1) * cellSize - pad,
-            paint
-        )
-    }
-
-    private fun getPieceSymbolAndLetter(p: Char): String = when (p) {
-        'K' -> "♔K"; 'Q' -> "♕Q"; 'R' -> "♖R"; 'B' -> "♗B"; 'N' -> "♘N"; 'P' -> "♙P"
-        'k' -> "♚k"; 'q' -> "♛q"; 'r' -> "♜r"; 'b' -> "♝b"; 'n' -> "♞n"; 'p' -> "♟p"
-        else -> ""
-    }
-
-    private fun drawMoveArrow(canvas: Canvas, uci: String, cellSize: Float, isBest: Boolean) {
+    private fun drawMoveArrow(canvas: Canvas, uci: String, cellSize: Float) {
         val fromFile = uci[0] - 'a'
         val fromRank = uci[1] - '1'
         val toFile = uci[2] - 'a'
@@ -249,21 +166,15 @@ class BoardOverlayView(context: Context) : View(context) {
         val x2 = (c2 + 0.5f) * cellSize
         val y2 = (r2 + 0.5f) * cellSize
 
-        if (isBest) {
-            canvas.drawLine(x1, y1, x2, y2, bestArrowPaint)
-            drawArrowHead(canvas, x1, y1, x2, y2, 34f, bestHeadPaint)
-        } else {
-            canvas.drawLine(x1, y1, x2, y2, ponderArrowPaint)
-        }
-    }
-
-    private fun drawArrowHead(canvas: Canvas, x1: Float, y1: Float, x2: Float, y2: Float, size: Float, paint: Paint) {
+        canvas.drawLine(x1, y1, x2, y2, bestArrowPaint)
         val angle = atan2((y2 - y1).toDouble(), (x2 - x1).toDouble())
-        val path = Path()
-        path.moveTo(x2, y2)
-        path.lineTo((x2 - size * cos(angle - Math.PI / 6)).toFloat(), (y2 - size * sin(angle - Math.PI / 6)).toFloat())
-        path.lineTo((x2 - size * cos(angle + Math.PI / 6)).toFloat(), (y2 - size * sin(angle + Math.PI / 6)).toFloat())
-        path.close()
-        canvas.drawPath(path, paint)
+        val headSize = 32f
+        val path = Path().apply {
+            moveTo(x2, y2)
+            lineTo((x2 - headSize * cos(angle - Math.PI / 6)).toFloat(), (y2 - headSize * sin(angle - Math.PI / 6)).toFloat())
+            lineTo((x2 - headSize * cos(angle + Math.PI / 6)).toFloat(), (y2 - headSize * sin(angle + Math.PI / 6)).toFloat())
+            close()
+        }
+        canvas.drawPath(path, bestHeadPaint)
     }
 }
