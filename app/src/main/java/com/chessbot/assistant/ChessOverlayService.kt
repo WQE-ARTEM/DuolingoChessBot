@@ -69,14 +69,13 @@ class ChessOverlayService : Service() {
     private var playerIsWhite = true
     private var autoPlayEnabled = true
     private var isMinimized = false
-    private var boardTopY = 830
+    private var boardTopY = 790
 
     private var currentBestMoveUci: String = ""
     private var isExecutingGesture = false
     private var waitingForOpponent = false
     private var lastAutoOpeningHash: String = ""
 
-    // Если бот нажал на экран во время анимации Оскара и ход не прошёл, храним его для авто-повтора
     private var pendingBotMove: ChessEngine.Move? = null
     private var pendingMoveRetries = 0
 
@@ -96,8 +95,8 @@ class ChessOverlayService : Service() {
         screenWidth = (bounds.width() / 2) * 2
         screenHeight = (bounds.height() / 2) * 2
         screenDensity = metrics.densityDpi
-        // В Duolingo с заголовком "СЫГРАЕМ В ШАХМАТЫ" доска начинается ровно на 0.351f высоты экрана
-        boardTopY = (screenHeight * 0.351f).toInt()
+        // 0.330f — точная координата доски Duolingo на твоем телефоне!
+        boardTopY = (screenHeight * 0.330f).toInt()
         chessEngine = ChessEngine(this)
 
         captureThread = HandlerThread("ScreenCaptureThread").apply { start() }
@@ -111,7 +110,7 @@ class ChessOverlayService : Service() {
             boardTopY = if (isChessComMode) {
                 (screenHeight * 0.324f).toInt()
             } else {
-                (screenHeight * 0.351f).toInt()
+                (screenHeight * 0.330f).toInt()
             }
 
             startForegroundWithNotification()
@@ -146,8 +145,8 @@ class ChessOverlayService : Service() {
         nm.createNotificationChannel(channel)
         val modeName = if (isChessComMode) "Chess.com" else "Duolingo"
         val notification: Notification = NotificationCompat.Builder(this, channelId)
-            .setContentTitle("Chess Bot ($modeName) — Автопилот")
-            .setContentText("Стабильная сетка + авто-повтор хода")
+            .setContentTitle("Chess Bot v10 PRO ($modeName)")
+            .setContentText("Автопилот активен")
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setOngoing(true)
             .build()
@@ -194,15 +193,15 @@ class ChessOverlayService : Service() {
 
         val rootPanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.argb(238, 18, 25, 34))
+            setBackgroundColor(Color.argb(240, 16, 24, 32))
             setPadding(6, 4, 6, 4)
         }
         controlPanel = rootPanel
 
-        val modeTitle = if (isChessComMode) "♟️ Chess.com" else "🦉 Duolingo"
+        val modeTitle = if (isChessComMode) "♟️ v10 Chess.com" else "🦉 v10 PRO"
         statusText = TextView(this).apply {
-            text = "$modeTitle | 🤖 Автопилот ВКЛ — готов к игре!"
-            setTextColor(Color.rgb(110, 255, 160))
+            text = "$modeTitle | 🤖 Автопилот ВКЛ — жду партию!"
+            setTextColor(Color.rgb(100, 255, 160))
             textSize = 11f
             setPadding(4, 2, 4, 3)
         }
@@ -224,7 +223,7 @@ class ChessOverlayService : Service() {
         }
 
         val btnScan = makeBtn("🔍 Скан", Color.rgb(20, 125, 155), 1.0f).apply {
-            setOnClickListener { forceFullRescan() }
+            setOnClickListener { forceSyncAndPlay() }
         }
 
         val btnMove = makeBtn("▶️ Ход", Color.rgb(35, 145, 75), 1.0f).apply {
@@ -257,7 +256,7 @@ class ChessOverlayService : Service() {
                 text = if (playerIsWhite) "⬜ Бел" else "⬛ Чер"
                 lastAutoOpeningHash = ""
                 pendingBotMove = null
-                forceFullRescan()
+                forceSyncAndPlay()
             }
         }
         btnSideView = btnSide
@@ -271,7 +270,7 @@ class ChessOverlayService : Service() {
                 boardOverlay?.detectedBoard = internalBoard
                 boardOverlay?.bestMoveUci = null
                 boardOverlay?.invalidate()
-                forceFullRescan()
+                forceSyncAndPlay()
             }
         }
 
@@ -395,32 +394,15 @@ class ChessOverlayService : Service() {
         watcherJob = serviceScope.launch {
             var prevSignature = ""
             var stableFrames = 0
-            var initialCalibrated = false
 
             while (isActive) {
-                delay(260L)
+                delay(280L)
                 if (isMinimized || isExecutingGesture) {
                     stableFrames = 0
                     continue
                 }
 
                 val frame = latestFrameBitmap ?: continue
-
-                // Калибруем Y только при старте (в строгом коридоре 0.310..0.372), чтобы сетка никогда не прыгала на Оскара
-                if (!initialCalibrated) {
-                    val newTopY = withContext(Dispatchers.Default) {
-                        BoardRecognizer.findBoardTopY(frame, boardTopY, isChessComMode)
-                    }
-                    if (abs(newTopY - boardTopY) in 2..120) {
-                        boardTopY = newTopY
-                        overlayParams?.let { p ->
-                            p.y = boardTopY
-                            boardOverlay?.boardTopPx = boardTopY.toFloat()
-                            try { windowManager.updateViewLayout(boardOverlay, p) } catch (_: Throwable) {}
-                        }
-                    }
-                    initialCalibrated = true
-                }
 
                 val screenPres = withContext(Dispatchers.Default) {
                     BoardRecognizer.scanScreenPresence(frame, boardTopY, screenWidth, isChessComMode)
@@ -435,6 +417,7 @@ class ChessOverlayService : Service() {
                 stableFrames++
                 if (stableFrames < 2) continue
 
+                // 1. Автоопределение стороны (Белые или Чёрные внизу экрана)
                 val detectedSide = BoardRecognizer.detectPlayerColorFromPresence(screenPres, playerIsWhite)
                 if (detectedSide != playerIsWhite) {
                     playerIsWhite = detectedSide
@@ -444,22 +427,20 @@ class ChessOverlayService : Service() {
 
                 val bp = BoardRecognizer.toBoardPresence(screenPres, playerIsWhite)
 
-                // 1. Проверяем, прошёл ли наш последний авто-ход на реальном экране игры!
+                // 2. Проверка выполнения нашего последнего авто-хода
                 val pending = pendingBotMove
                 if (pending != null) {
                     val myColorChar = if (playerIsWhite) 'W' else 'B'
-                    // Если наша фигура всё ещё стоит на стартовой клетке (fromR, fromC) — значит игра пропустила клик из-за анимации Оскара!
                     if (bp[pending.fromR][pending.fromC] == myColorChar && bp[pending.toR][pending.toC] != myColorChar) {
                         if (pendingMoveRetries < 3 && autoPlayEnabled) {
                             pendingMoveRetries++
-                            statusText?.text = "🔄 Повтор хода ${pending.toUci()} после анимации..."
+                            statusText?.text = "🔄 Повтор хода ${pending.toUci()}..."
                             dispatchMoveGestureOnly(pending)
                             continue
                         } else {
                             pendingBotMove = null
                         }
                     } else {
-                        // Ход успешно выполнился на экране! Фиксируем его в internalBoard
                         applyMoveToBoard(internalBoard, pending)
                         boardOverlay?.invalidate()
                         pendingBotMove = null
@@ -467,7 +448,7 @@ class ChessOverlayService : Service() {
                     }
                 }
 
-                // 2. Проверяем старт новой партии (0 ходов или 1 ход Белых)
+                // 3. Проверка старта новой партии (0 ходов или 1 ход Белых, когда мы играем Чёрными)
                 val openingBoard = BoardRecognizer.tryDetectOpeningBoard(bp)
                 if (openingBoard != null) {
                     val openHash = presenceToString(bp) + "_$playerIsWhite"
@@ -483,20 +464,21 @@ class ChessOverlayService : Service() {
                         val isMyTurnAtStart = (playerIsWhite && midPieces == 0) || (!playerIsWhite && midPieces == 1)
                         if (isMyTurnAtStart) {
                             waitingForOpponent = false
-                            statusText?.text = "🚀 Новая партия! Делаю 1-й ход..."
+                            statusText?.text = "🚀 v10 PRO: Старт (${if (playerIsWhite) "Белые" else "Чёрные"})! Хожу..."
                             runEngineAndMaybePlay()
                         } else {
                             waitingForOpponent = true
-                            statusText?.text = "👀 Новая партия. Жду 1-й ход соперника..."
+                            statusText?.text = "👀 v10 PRO: Жду 1-й ход соперника..."
                         }
                         continue
                     }
                 }
 
-                // 3. Сопоставляем экран с internalBoard через легальные ходы
+                // 4. Отслеживание хода соперника или игрока (включая любые взятия)
                 val diffCount = countPresenceDiffs(internalBoard, bp)
                 if (diffCount == 0) continue
 
+                // А) Проверяем легальный ход соперника
                 val opponentMove = findMatchingLegalMove(internalBoard, !playerIsWhite, bp)
                 if (opponentMove != null) {
                     applyMoveToBoard(internalBoard, opponentMove)
@@ -507,16 +489,25 @@ class ChessOverlayService : Service() {
                     continue
                 }
 
-                val playerManualMove = findMatchingLegalMove(internalBoard, playerIsWhite, bp)
-                if (playerManualMove != null) {
-                    applyMoveToBoard(internalBoard, playerManualMove)
-                    boardOverlay?.bestMoveUci = null
+                // Б) Прямой детектор любого одиночного хода/взятия (1 клетка освободилась и 1 занялась тем же цветом)
+                val directMove = findDirectSingleMove(internalBoard, bp)
+                if (directMove != null) {
+                    val movedPiece = internalBoard[directMove.fromR][directMove.fromC]
+                    val wasEnemy = movedPiece != '.' && (movedPiece.isUpperCase() != playerIsWhite)
+                    applyMoveToBoard(internalBoard, directMove)
                     boardOverlay?.invalidate()
-                    waitingForOpponent = true
-                    statusText?.text = "✅ Ход ${playerManualMove.toUci()} учтён. Жду соперника..."
+                    if (wasEnemy) {
+                        waitingForOpponent = false
+                        statusText?.text = "⚡ Соперник: ${directMove.toUci()}! Отвечаю..."
+                        runEngineAndMaybePlay()
+                    } else {
+                        waitingForOpponent = true
+                        statusText?.text = "✅ Ход ${directMove.toUci()} учтён. Жду соперника..."
+                    }
                     continue
                 }
 
+                // В) Проверяем связку из 2 полуходов подряд (наш ход + быстрый ответ соперника)
                 val twoPly = findMatchingTwoPlyMoves(internalBoard, playerIsWhite, bp)
                 if (twoPly != null) {
                     applyMoveToBoard(internalBoard, twoPly.first)
@@ -530,51 +521,72 @@ class ChessOverlayService : Service() {
         }
     }
 
-    private fun forceFullRescan() {
+    private fun forceSyncAndPlay() {
         serviceScope.launch {
             pendingBotMove = null
             boardOverlay?.bestMoveUci = null
-            boardOverlay?.visibility = View.INVISIBLE
-            delay(130L)
-            val cleanFrame = latestFrameBitmap
-            boardOverlay?.visibility = View.VISIBLE
-
-            if (cleanFrame == null) {
+            boardOverlay?.invalidate()
+            delay(80L)
+            val frame = latestFrameBitmap
+            if (frame == null) {
                 statusText?.text = "⚠️ Жду кадр экрана..."
                 return@launch
             }
 
-            val detY = withContext(Dispatchers.Default) {
-                BoardRecognizer.findBoardTopY(cleanFrame, boardTopY, isChessComMode)
-            }
-            boardTopY = detY
-            overlayParams?.let { p ->
-                p.y = boardTopY
-                boardOverlay?.boardTopPx = boardTopY.toFloat()
-                try { windowManager.updateViewLayout(boardOverlay, p) } catch (_: Throwable) {}
-            }
-
             val screenPres = withContext(Dispatchers.Default) {
-                BoardRecognizer.scanScreenPresence(cleanFrame, boardTopY, screenWidth, isChessComMode)
-            }
-            if (screenPres != null) {
-                playerIsWhite = BoardRecognizer.detectPlayerColorFromPresence(screenPres, playerIsWhite)
-                boardOverlay?.whiteAtBottom = playerIsWhite
-                btnSideView?.text = if (playerIsWhite) "⬜ Бел" else "⬛ Чер"
-            }
+                BoardRecognizer.scanScreenPresence(frame, boardTopY, screenWidth, isChessComMode)
+            } ?: return@launch
 
-            val rebuilt = withContext(Dispatchers.Default) {
-                BoardRecognizer.reconstructBoardFromPresence(
-                    cleanFrame, boardTopY, screenWidth,
-                    isChessComMode, playerIsWhite, internalBoard
-                )
-            }
-            internalBoard = rebuilt
+            playerIsWhite = BoardRecognizer.detectPlayerColorFromPresence(screenPres, playerIsWhite)
+            boardOverlay?.whiteAtBottom = playerIsWhite
+            btnSideView?.text = if (playerIsWhite) "⬜ Бел" else "⬛ Чер"
+
+            val bp = BoardRecognizer.toBoardPresence(screenPres, playerIsWhite)
+            internalBoard = BoardRecognizer.syncBoardWithPresence(bp, internalBoard)
             boardOverlay?.detectedBoard = internalBoard
             boardOverlay?.invalidate()
             waitingForOpponent = false
             runEngineAndMaybePlay()
         }
+    }
+
+    // Безотказно ловит любой ход или взятие (включая съедение ферзя), где 1 фигура ушла со своей клетки и встала на пустую или вражескую клетку
+    private fun findDirectSingleMove(
+        board: Array<CharArray>,
+        targetPresence: Array<CharArray>
+    ): ChessEngine.Move? {
+        val vacated = ArrayList<Pair<Int, Int>>()
+        val arrived = ArrayList<Pair<Int, Int>>()
+
+        for (r in 0..7) {
+            for (c in 0..7) {
+                val p = board[r][c]
+                val memVis = when {
+                    p == '.' -> '.'
+                    p.isUpperCase() -> 'W'
+                    else -> 'B'
+                }
+                val screenVis = targetPresence[r][c]
+                if (memVis != screenVis) {
+                    if (memVis != '.' && screenVis == '.') {
+                        vacated.add(r to c)
+                    } else if (screenVis != '.') {
+                        arrived.add(r to c)
+                    }
+                }
+            }
+        }
+
+        if (vacated.size == 1 && arrived.size == 1) {
+            val (fr, fc) = vacated[0]
+            val (tr, tc) = arrived[0]
+            val movingPiece = board[fr][fc]
+            val movingColor = if (movingPiece.isUpperCase()) 'W' else 'B'
+            if (targetPresence[tr][tc] == movingColor) {
+                return ChessEngine.Move(fr, fc, tr, tc)
+            }
+        }
+        return null
     }
 
     private fun findMatchingLegalMove(
@@ -688,15 +700,15 @@ class ChessOverlayService : Service() {
                 boardOverlay?.invalidate()
 
                 val sign = if (result.evalCp >= 0) "+" else ""
-                statusText?.text = "💡 Ход: ${result.bestMove} ($sign${result.evalCp / 100f})"
+                statusText?.text = "💡 v10 Ход: ${result.bestMove} ($sign${result.evalCp / 100f})"
 
                 if (autoPlayEnabled) {
-                    delay(240L)
+                    delay(220L)
                     val moveObj = parseUciMove(result.bestMove)
                     if (moveObj != null) executeBotMove(moveObj)
                 }
             } else {
-                statusText?.text = "🏁 Партия завершена (или жми [🔄 Новая])"
+                statusText?.text = "🏁 Жми [🔄 Новая] для следующей партии"
             }
         }
     }
@@ -717,7 +729,6 @@ class ChessOverlayService : Service() {
             return
         }
 
-        // Сохраняем ход в pendingBotMove: он запишется в internalBoard после проверки, что фигура реально сдвинулась на экране!
         pendingBotMove = moveObj
         pendingMoveRetries = 0
         dispatchMoveGestureOnly(moveObj)
@@ -742,7 +753,7 @@ class ChessOverlayService : Service() {
             mainHandler.postDelayed({
                 isExecutingGesture = false
                 statusText?.text = "👀 Жду ответ соперника..."
-            }, 520L)
+            }, 500L)
         }
     }
 

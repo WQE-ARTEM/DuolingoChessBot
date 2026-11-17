@@ -23,40 +23,36 @@ class BoardOverlayView(context: Context) : View(context) {
 
     var detectedBoard: Array<CharArray>? = null
     var bestMoveUci: String? = null
-    var ponderMoveUci: String? = null
     var evalScoreCp: Int = 0
-    var selectedBoardCell: Pair<Int, Int>? = null
-    var lastMovedCells: Pair<Pair<Int, Int>, Pair<Int, Int>>? = null
 
     var onBoardCellClick: ((Int, Int) -> Unit)? = null
 
     private val badgeRect = RectF()
 
-    // Тонкая фиолетово-золотая сетка (не пересекается по спектру с голубыми фигурами Duolingo)
     private val gridPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(110, 255, 200, 0)
+        color = Color.argb(115, 0, 229, 255)
         style = Paint.Style.STROKE
-        strokeWidth = 1.5f
+        strokeWidth = 1.8f
     }
 
     private val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(220, 46, 255, 120)
+        color = Color.argb(230, 46, 255, 120)
         style = Paint.Style.STROKE
         strokeWidth = 4f
     }
 
     private val whiteBadgeBg = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(230, 250, 250, 240)
+        color = Color.argb(235, 245, 250, 255)
         style = Paint.Style.FILL
     }
 
     private val blackBadgeBg = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(230, 28, 22, 38)
+        color = Color.argb(235, 20, 28, 38)
         style = Paint.Style.FILL
     }
 
     private val badgeStroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.rgb(255, 195, 0)
+        color = Color.rgb(255, 200, 0)
         style = Paint.Style.STROKE
         strokeWidth = 2f
     }
@@ -68,14 +64,14 @@ class BoardOverlayView(context: Context) : View(context) {
     }
 
     private val bestArrowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(235, 46, 255, 85)
+        color = Color.argb(240, 46, 255, 85)
         style = Paint.Style.STROKE
-        strokeWidth = 11f
+        strokeWidth = 12f
         strokeCap = Paint.Cap.ROUND
     }
 
     private val bestHeadPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(235, 46, 255, 85)
+        color = Color.argb(240, 46, 255, 85)
         style = Paint.Style.FILL
     }
 
@@ -112,7 +108,7 @@ class BoardOverlayView(context: Context) : View(context) {
                 canvas.drawLine(0f, off, size, off, gridPaint)
             }
 
-            // Компактная метка строго в ЛЕВОМ ВЕРХНЕМ уголке (0..26% клетки) — центр и низ фигуры на 100% свободны!
+            // Маленький значок в ЛЕВОМ ВЕРХНЕМ углу клетки
             detectedBoard?.let { grid ->
                 for (r in 0..7) {
                     for (c in 0..7) {
@@ -122,18 +118,18 @@ class BoardOverlayView(context: Context) : View(context) {
                         val sc = if (whiteAtBottom) c else 7 - c
                         val sr = if (whiteAtBottom) r else 7 - r
 
-                        val bw = cellSize * 0.34f
-                        val bh = cellSize * 0.24f
+                        val bw = cellSize * 0.32f
+                        val bh = cellSize * 0.23f
                         val left = sc * cellSize + 2f
                         val top = sr * cellSize + 2f
                         badgeRect.set(left, top, left + bw, top + bh)
 
                         val isW = p.isUpperCase()
-                        canvas.drawRoundRect(badgeRect, 6f, 6f, if (isW) whiteBadgeBg else blackBadgeBg)
-                        canvas.drawRoundRect(badgeRect, 6f, 6f, badgeStroke)
+                        canvas.drawRoundRect(badgeRect, 5f, 5f, if (isW) whiteBadgeBg else blackBadgeBg)
+                        canvas.drawRoundRect(badgeRect, 5f, 5f, badgeStroke)
 
-                        pieceTextPaint.color = if (isW) Color.rgb(15, 20, 30) else Color.rgb(255, 230, 130)
-                        pieceTextPaint.textSize = cellSize * 0.17f
+                        pieceTextPaint.color = if (isW) Color.rgb(15, 20, 30) else Color.rgb(255, 225, 100)
+                        pieceTextPaint.textSize = cellSize * 0.16f
                         canvas.drawText(
                             p.toString(),
                             badgeRect.centerX(),

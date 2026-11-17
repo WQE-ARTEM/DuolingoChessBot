@@ -13,75 +13,6 @@ object BoardRecognizer {
     private val bgGList = IntArray(6)
     private val bgBList = IntArray(6)
 
-    // Ищет точный верхний край доски ТОЛЬКО в реальной зоне доски (0.310 .. 0.372 высоты экрана)
-    // Никогда не запрыгивает на лицо Оскара или облачко диалога!
-    fun findBoardTopY(bitmap: Bitmap, expectedTopY: Int, isChessCom: Boolean): Int {
-        val w = bitmap.width
-        val h = bitmap.height
-        val cellW = w / 8
-        // Строгие границы: доска физически всегда начинается между 31.0% и 37.2% высоты экрана
-        val minY = (h * 0.310f).toInt().coerceAtLeast(10)
-        val maxY = (h * 0.372f).toInt().coerceAtMost(h - w - 10)
-
-        var bestY = expectedTopY.coerceIn(minY, maxY)
-        var bestScore = -9999
-
-        for (y in minY..maxY step 2) {
-            var score = 0
-            // Проверяем шахматный паттерн: в каждом ряду (2, 3, 4, 5) четные клетки светлее нечетных на четных рядах и наоборот
-            for (r in 2..5) {
-                val sy = y + r * cellW + (cellW * 0.42f).toInt()
-                if (sy >= h - 8) continue
-                var lightSum = 0
-                var darkSum = 0
-                var validRow = true
-
-                for (c in 0..7) {
-                    val sx = c * cellW + (cellW * 0.85f).toInt()
-                    val p = bitmap.getPixel(sx.coerceIn(0, w - 1), sy)
-                    val pr = Color.red(p); val pg = Color.green(p); val pb = Color.blue(p)
-                    val lum = (pr * 299 + pg * 587 + pb * 114) / 1000
-
-                    if (!isChessCom && (lum !in 16..88 || pr > pb + 12)) {
-                        validRow = false
-                        break
-                    }
-                    if ((r + c) % 2 == 0) lightSum += lum else darkSum += lum
-                }
-
-                if (!validRow) {
-                    score -= 30
-                } else {
-                    val avgDiff = (lightSum - darkSum) / 4
-                    if (isChessCom && avgDiff in 20..160) score += 25
-                    else if (!isChessCom && avgDiff in 8..42) score += 25
-                    else score -= 15
-                }
-            }
-
-            // Дополнительный бонус за чёткую верхнюю границу над 0-м рядом и нижнюю границу под 7-м рядом
-            val aboveY = (y - 6).coerceAtLeast(0)
-            val belowY = (y + w + 6).coerceAtMost(h - 1)
-            val pAbove0 = bitmap.getPixel((cellW * 0.5f).toInt(), aboveY)
-            val pAbove1 = bitmap.getPixel(cellW + (cellW * 0.5f).toInt(), aboveY)
-            val pBelow0 = bitmap.getPixel((cellW * 0.5f).toInt(), belowY)
-            val pBelow1 = bitmap.getPixel(cellW + (cellW * 0.5f).toInt(), belowY)
-
-            val diffAbove = abs(Color.red(pAbove0) - Color.red(pAbove1)) + abs(Color.blue(pAbove0) - Color.blue(pAbove1))
-            val diffBelow = abs(Color.red(pBelow0) - Color.red(pBelow1)) + abs(Color.blue(pBelow0) - Color.blue(pBelow1))
-
-            if (diffAbove <= 8) score += 12
-            if (diffBelow <= 8) score += 18
-
-            if (score > bestScore) {
-                bestScore = score
-                bestY = y
-            }
-        }
-
-        return if (bestScore >= 50) bestY else expectedTopY.coerceIn(minY, maxY)
-    }
-
     @Synchronized
     fun scanScreenPresence(
         bitmap: Bitmap,
@@ -103,16 +34,121 @@ object BoardRecognizer {
         val presence = Array(8) { CharArray(8) { '.' } }
         for (sr in 0..7) {
             for (sc in 0..7) {
-                presence[sr][sc] = detectCellColor(
-                    reusablePixels, size,
-                    sc * cellSize, sr * cellSize, cellSize,
-                    isChessCom
-                )
+                presence[sr][sc] = if (isChessCom) {
+                    detectChessComCell(reusablePixels, size, sc * cellSize, sr * cellSize, cellSize)
+                } else {
+                    detectDuolingoCell(reusablePixels, size, sc * cellSize, sr * cellSize, cellSize)
+                }
             }
         }
         return presence
     }
 
+    // В Duolingo яркость пустых клеток (25..58), чёрных фигур (68..165) и белых фигур (180..255) не пересекается!
+    private fun detectDuolingoCell(
+        pixels: IntArray,
+        stride: Int,
+        cellX: Float,
+        cellY: Float,
+        cellSize: Float
+    ): Char {
+        val N = 32
+        var whitePixels = 0   // lum >= 180 (ярко-белая заливка белых фигур)
+        var blackOutline = 0  // lum in 92..172 (голубой контур чёрных фигур)
+        var blackBody = 0     // lum in 64..91 (синее тело чёрных фигур)
+
+        // Сканируем центральную зону клетки (gx 7..25, gy 9..26), не задевая левый верхний бейдж и края клетки
+        for (gy in 9..26) {
+            for (gx in 7..25) {
+                val px = (cellX + (gx + 0.5f) * cellSize / N).toInt().coerceIn(0, stride - 1)
+                val py = (cellY + (gy + 0.5f) * cellSize / N).toInt().coerceIn(0, stride - 1)
+                val c = pixels[py * stride + px]
+                val r = Color.red(c); val g = Color.green(c); val b = Color.blue(c)
+
+                // Пропускаем ярко-зелёную стрелку подсказки
+                if (g > 200 && g > r + 75 && b < 130) continue
+                // Пропускаем жёлтую рамку бейджа, если вдруг задели
+                if (r > 220 && g > 170 && b < 40) continue
+
+                val lum = (r * 299 + g * 587 + b * 114) / 1000
+                when {
+                    lum >= 180 && r >= 150 -> whitePixels++
+                    lum in 92..172 && b >= r -> blackOutline++
+                    lum in 64..91 && b >= r -> blackBody++
+                }
+            }
+        }
+
+        // Если в центре клетки >= 22 ярко-белых пикселей — это 100% Белая фигура
+        if (whitePixels >= 22) return 'W'
+
+        // Если есть контур чёрной фигуры (blackOutline >= 8) и её тело (blackOutline + blackBody >= 26) — это 100% Чёрная фигура
+        if (blackOutline >= 8 && (blackOutline + blackBody) >= 26) return 'B'
+
+        return '.'
+    }
+
+    private val bgPoints = arrayOf(
+        2 to 15, 2 to 23,
+        29 to 15, 29 to 23,
+        6 to 29, 25 to 29
+    )
+
+    private fun detectChessComCell(
+        pixels: IntArray,
+        stride: Int,
+        cellX: Float,
+        cellY: Float,
+        cellSize: Float
+    ): Char {
+        val N = 32
+        for (i in 0 until 6) {
+            val (gx, gy) = bgPoints[i]
+            val px = (cellX + (gx + 0.5f) * cellSize / N).toInt().coerceIn(0, stride - 1)
+            val py = (cellY + (gy + 0.5f) * cellSize / N).toInt().coerceIn(0, stride - 1)
+            val c = pixels[py * stride + px]
+            bgRList[i] = Color.red(c)
+            bgGList[i] = Color.green(c)
+            bgBList[i] = Color.blue(c)
+        }
+        bgRList.sort(); bgGList.sort(); bgBList.sort()
+        val bgR = bgRList[3]; val bgG = bgGList[3]; val bgB = bgBList[3]
+
+        var fgTotal = 0
+        var baseFg = 0
+        var whiteVotes = 0
+        var blackVotes = 0
+
+        for (gy in 11..27) {
+            for (gx in 7..24) {
+                val px = (cellX + (gx + 0.5f) * cellSize / N).toInt().coerceIn(0, stride - 1)
+                val py = (cellY + (gy + 0.5f) * cellSize / N).toInt().coerceIn(0, stride - 1)
+                val c = pixels[py * stride + px]
+                val r = Color.red(c); val g = Color.green(c); val b = Color.blue(c)
+
+                if (g > 200 && g > r + 80 && b < 130) continue
+
+                val dr = r - bgR; val dg = g - bgG; val db = b - bgB
+                val distSq = dr * dr + dg * dg + db * db
+                val lum = (r * 299 + g * 587 + b * 114) / 1000
+                val sat = max(r, max(g, b)) - min(r, min(g, b))
+
+                val isWhiteFill = r >= 228 && g >= 228 && b >= 218 && sat <= 24
+                val isDarkFill = lum <= 112 && sat <= 32
+                if ((isWhiteFill && distSq >= 450) || (isDarkFill && distSq >= 1500) || distSq >= 4400) {
+                    fgTotal++
+                    if (gy >= 20) baseFg++
+                    if (isWhiteFill) whiteVotes++
+                    else if (lum in 35..112) blackVotes++
+                }
+            }
+        }
+
+        if (fgTotal < 28 || baseFg < 12) return '.'
+        return if (whiteVotes >= 14 && whiteVotes >= blackVotes * 0.42f) 'W' else 'B'
+    }
+
+    // Автоматически определяет, за кого играет пользователь: Белые (true) или Чёрные (false)
     fun detectPlayerColorFromPresence(screenPresence: Array<CharArray>, currentWhiteAtBottom: Boolean): Boolean {
         var bottomW = 0; var bottomB = 0
         var topW = 0; var topB = 0
@@ -128,152 +164,9 @@ object BoardRecognizer {
         }
         val scoreWhiteBottom = bottomW + topB
         val scoreBlackBottom = bottomB + topW
-        if (scoreWhiteBottom >= 18 && scoreWhiteBottom >= scoreBlackBottom + 8) return true
-        if (scoreBlackBottom >= 18 && scoreBlackBottom >= scoreWhiteBottom + 8) return false
+        if (scoreWhiteBottom >= 16 && scoreWhiteBottom >= scoreBlackBottom + 6) return true
+        if (scoreBlackBottom >= 16 && scoreBlackBottom >= scoreWhiteBottom + 6) return false
         return currentWhiteAtBottom
-    }
-
-    // Точки фона по краям в нижней половине клетки (вдали от левого верхнего бейджа и от фигуры в центре)
-    private val bgPoints = arrayOf(
-        2 to 15, 2 to 23,
-        29 to 15, 29 to 23,
-        6 to 29, 25 to 29
-    )
-
-    // Сканирует ТОЛЬКО нижнюю центральную часть клетки (gx 8..23, gy 13..27), где находится массивное основание фигуры!
-    // Левый верхний угол с бейджем (gx 0..11, gy 0..9) никогда не попадает в скан!
-    private fun detectCellColor(
-        pixels: IntArray,
-        stride: Int,
-        cellX: Float,
-        cellY: Float,
-        cellSize: Float,
-        isChessCom: Boolean
-    ): Char {
-        val N = 32
-        for (i in 0 until 6) {
-            val (gx, gy) = bgPoints[i]
-            val px = (cellX + (gx + 0.5f) * cellSize / N).toInt().coerceIn(0, stride - 1)
-            val py = (cellY + (gy + 0.5f) * cellSize / N).toInt().coerceIn(0, stride - 1)
-            val c = pixels[py * stride + px]
-            bgRList[i] = Color.red(c)
-            bgGList[i] = Color.green(c)
-            bgBList[i] = Color.blue(c)
-        }
-        bgRList.sort(); bgGList.sort(); bgBList.sort()
-        val bgR = bgRList[3]; val bgG = bgGList[3]; val bgB = bgBList[3]
-        val bgLum = (bgR * 299 + bgG * 587 + bgB * 114) / 1000
-
-        var fgTotal = 0
-        var baseFg = 0
-        var whiteCoreVotes = 0
-        var blackCoreVotes = 0
-
-        for (gy in 13..27) {
-            for (gx in 8..23) {
-                val px = (cellX + (gx + 0.5f) * cellSize / N).toInt().coerceIn(0, stride - 1)
-                val py = (cellY + (gy + 0.5f) * cellSize / N).toInt().coerceIn(0, stride - 1)
-                val c = pixels[py * stride + px]
-                val r = Color.red(c); val g = Color.green(c); val b = Color.blue(c)
-
-                // Игнорируем ярко-зелёный цвет нашей стрелки
-                if (g > 200 && g > r + 80 && b < 130) continue
-
-                val dr = r - bgR; val dg = g - bgG; val db = b - bgB
-                val distSq = dr * dr + dg * dg + db * db
-                val lum = (r * 299 + g * 587 + b * 114) / 1000
-                val sat = max(r, max(g, b)) - min(r, min(g, b))
-
-                var isFg = false
-                if (isChessCom) {
-                    val isWhiteFill = r >= 228 && g >= 228 && b >= 218 && sat <= 24
-                    val isDarkFill = lum <= 112 && sat <= 32
-                    if ((isWhiteFill && distSq >= 450) || (isDarkFill && distSq >= 1500) || distSq >= 4400) {
-                        isFg = true
-                        if (isWhiteFill) whiteCoreVotes++
-                        else if (lum in 35..112) blackCoreVotes++
-                    }
-                } else {
-                    if (distSq >= 950 && lum >= bgLum + 18) {
-                        isFg = true
-                        if (lum >= 182 && r >= 155) {
-                            whiteCoreVotes++
-                        } else if (lum in 48..145) {
-                            blackCoreVotes++
-                        }
-                    }
-                }
-
-                if (isFg) {
-                    fgTotal++
-                    if (gy >= 20) baseFg++
-                }
-            }
-        }
-
-        if (fgTotal < 28 || baseFg < 12) return '.'
-
-        return if (isChessCom) {
-            if (whiteCoreVotes >= 12 && whiteCoreVotes >= blackCoreVotes * 0.42f) 'W' else 'B'
-        } else {
-            if (whiteCoreVotes >= 10 && whiteCoreVotes >= fgTotal * 0.25f) 'W' else 'B'
-        }
-    }
-
-    @Synchronized
-    fun reconstructBoardFromPresence(
-        bitmap: Bitmap,
-        boardTopPx: Int,
-        boardSizePx: Int,
-        isChessCom: Boolean,
-        whiteAtBottom: Boolean,
-        previousBoard: Array<CharArray>?
-    ): Array<CharArray> {
-        val screenPres = scanScreenPresence(bitmap, boardTopPx, boardSizePx, isChessCom)
-            ?: return previousBoard ?: createInitialBoard()
-
-        val bp = toBoardPresence(screenPres, whiteAtBottom)
-
-        val openingBoard = tryDetectOpeningBoard(bp)
-        if (openingBoard != null) return openingBoard
-
-        val top = boardTopPx.coerceIn(0, max(0, bitmap.height - 64))
-        val size = min(boardSizePx, min(bitmap.width, bitmap.height - top))
-        val cellSize = size / 8f
-
-        val result = Array(8) { CharArray(8) { '.' } }
-        val stdInit = createInitialBoard()
-
-        for (r in 0..7) {
-            for (c in 0..7) {
-                val pColor = bp[r][c]
-                if (pColor == '.') {
-                    result[r][c] = '.'
-                    continue
-                }
-                val wantWhite = (pColor == 'W')
-
-                val prevP = previousBoard?.get(r)?.get(c) ?: '.'
-                if (prevP != '.' && prevP.isUpperCase() == wantWhite) {
-                    result[r][c] = prevP
-                    continue
-                }
-
-                val initP = stdInit[r][c]
-                if (initP != '.' && initP.isUpperCase() == wantWhite) {
-                    result[r][c] = initP
-                    continue
-                }
-
-                val sr = if (whiteAtBottom) r else 7 - r
-                val sc = if (whiteAtBottom) c else 7 - c
-                val guessed = classifyPuzzleSilhouette(reusablePixels, size, sc * cellSize, sr * cellSize, cellSize, r)
-                result[r][c] = if (wantWhite) guessed.uppercaseChar() else guessed
-            }
-        }
-
-        ensureValidKingsAndPawns(result)
-        return result
     }
 
     fun toBoardPresence(screenPresence: Array<CharArray>, whiteAtBottom: Boolean): Array<CharArray> {
@@ -288,141 +181,97 @@ object BoardRecognizer {
         return bp
     }
 
+    // Распознаёт старт новой партии (0 ходов, 1 ход Белых как f2-f3 на скрине, или по 1 ходу с каждой стороны)
     fun tryDetectOpeningBoard(bp: Array<CharArray>): Array<CharArray>? {
         var blackHomeCount = 0
         var whiteHomeCount = 0
         var midW = 0; var midB = 0
-        var missingWhiteHome: Pair<Int, Int>? = null
-        var arrivedWhiteMid: Pair<Int, Int>? = null
-        var missingBlackHome: Pair<Int, Int>? = null
-        var arrivedBlackMid: Pair<Int, Int>? = null
+        val missingWhiteHome = ArrayList<Pair<Int, Int>>()
+        val arrivedWhiteMid = ArrayList<Pair<Int, Int>>()
+        val missingBlackHome = ArrayList<Pair<Int, Int>>()
+        val arrivedBlackMid = ArrayList<Pair<Int, Int>>()
 
         for (c in 0..7) {
             for (r in 0..1) {
                 if (bp[r][c] == 'B') blackHomeCount++
-                else if (bp[r][c] == '.') missingBlackHome = r to c
+                else if (bp[r][c] == '.') missingBlackHome.add(r to c)
             }
             for (r in 6..7) {
                 if (bp[r][c] == 'W') whiteHomeCount++
-                else if (bp[r][c] == '.') missingWhiteHome = r to c
+                else if (bp[r][c] == '.') missingWhiteHome.add(r to c)
             }
             for (r in 2..5) {
-                if (bp[r][c] == 'W') { midW++; arrivedWhiteMid = r to c }
-                else if (bp[r][c] == 'B') { midB++; arrivedBlackMid = r to c }
+                if (bp[r][c] == 'W') { midW++; arrivedWhiteMid.add(r to c) }
+                else if (bp[r][c] == 'B') { midB++; arrivedBlackMid.add(r to c) }
             }
         }
 
+        // 0 ходов (чистый старт за Белых)
         if (blackHomeCount == 16 && whiteHomeCount == 16 && midW == 0 && midB == 0) {
             return createInitialBoard()
         }
 
+        // 1 ход Белых (старт за Чёрных — например Белые сходили f2-f3, e2-e4, d2-d4, g1-f3)
         if (blackHomeCount == 16 && whiteHomeCount == 15 && midW == 1 && midB == 0 &&
-            missingWhiteHome != null && arrivedWhiteMid != null
+            missingWhiteHome.size == 1 && arrivedWhiteMid.size == 1
         ) {
             val board = createInitialBoard()
-            val (fr, fc) = missingWhiteHome
-            val (tr, tc) = arrivedWhiteMid
+            val (fr, fc) = missingWhiteHome[0]
+            val (tr, tc) = arrivedWhiteMid[0]
             board[tr][tc] = board[fr][fc]
             board[fr][fc] = '.'
             return board
         }
 
+        // 1 ход Белых + 1 ход Чёрных
         if (blackHomeCount == 15 && whiteHomeCount == 15 && midW == 1 && midB == 1 &&
-            missingWhiteHome != null && arrivedWhiteMid != null &&
-            missingBlackHome != null && arrivedBlackMid != null
+            missingWhiteHome.size == 1 && arrivedWhiteMid.size == 1 &&
+            missingBlackHome.size == 1 && arrivedBlackMid.size == 1
         ) {
             val board = createInitialBoard()
-            board[arrivedWhiteMid.first][arrivedWhiteMid.second] = board[missingWhiteHome.first][missingWhiteHome.second]
-            board[missingWhiteHome.first][missingWhiteHome.second] = '.'
-            board[arrivedBlackMid.first][arrivedBlackMid.second] = board[missingBlackHome.first][missingBlackHome.second]
-            board[missingBlackHome.first][missingBlackHome.second] = '.'
+            board[arrivedWhiteMid[0].first][arrivedWhiteMid[0].second] = board[missingWhiteHome[0].first][missingWhiteHome[0].second]
+            board[missingWhiteHome[0].first][missingWhiteHome[0].second] = '.'
+            board[arrivedBlackMid[0].first][arrivedBlackMid[0].second] = board[missingBlackHome[0].first][missingBlackHome[0].second]
+            board[missingBlackHome[0].first][missingBlackHome[0].second] = '.'
             return board
         }
 
         return null
     }
 
-    private fun classifyPuzzleSilhouette(
-        pixels: IntArray,
-        stride: Int,
-        cellX: Float,
-        cellY: Float,
-        cellSize: Float,
-        boardRow: Int
-    ): Char {
-        val N = 32
-        val bgR = Color.red(pixels[(cellY + (24 * cellSize / N)).toInt().coerceIn(0, stride - 1) * stride + (cellX + 4).toInt().coerceIn(0, stride - 1)])
-        var minGy = N; var maxGy = -1
-        val widths = IntArray(N)
+    // Умная синхронизация без потери типов фигур при нажатии "Скан" в середине партии
+    fun syncBoardWithPresence(
+        bp: Array<CharArray>,
+        previousBoard: Array<CharArray>
+    ): Array<CharArray> {
+        val opening = tryDetectOpeningBoard(bp)
+        if (opening != null) return opening
 
-        for (gy in 3..28) {
-            var l = N; var r = -1
-            for (gx in 6..26) {
-                if (gx <= 11 && gy <= 9) continue // пропускаем левый верхний бейдж
-                val px = (cellX + (gx + 0.5f) * cellSize / N).toInt().coerceIn(0, stride - 1)
-                val py = (cellY + (gy + 0.5f) * cellSize / N).toInt().coerceIn(0, stride - 1)
-                val c = pixels[py * stride + px]
-                if (abs(Color.red(c) - bgR) >= 34) {
-                    if (gy < minGy) minGy = gy
-                    if (gy > maxGy) maxGy = gy
-                    if (gx < l) l = gx
-                    if (gx > r) r = gx
-                }
-            }
-            if (r >= l) widths[gy] = r - l + 1
-        }
+        val result = Array(8) { CharArray(8) { '.' } }
+        val stdInit = createInitialBoard()
 
-        val boxH = (maxGy - minGy + 1).coerceAtLeast(1)
-        val relH = boxH / 24f
-        var baseW = 1
-        for (gy in max(3, maxGy - 5)..maxGy.coerceAtLeast(3)) if (widths[gy] > baseW) baseW = widths[gy]
-        var headW = 0
-        for (gy in minGy.coerceAtMost(28)..min(28, minGy + 6)) if (widths[gy] > headW) headW = widths[gy]
-        val topRatio = headW.toFloat() / baseW.coerceAtLeast(1)
-
-        val isBackRank = (boardRow == 0 || boardRow == 7)
-        return when {
-            !isBackRank && relH < 0.72f && topRatio < 0.70f -> 'p'
-            relH >= 0.85f && topRatio >= 0.65f -> 'k'
-            relH >= 0.78f && topRatio >= 0.75f -> 'q'
-            topRatio >= 0.70f -> 'r'
-            relH >= 0.74f && topRatio < 0.66f -> 'b'
-            else -> 'n'
-        }
-    }
-
-    private fun ensureValidKingsAndPawns(grid: Array<CharArray>) {
-        for (r in intArrayOf(0, 7)) {
+        for (r in 0..7) {
             for (c in 0..7) {
-                if (grid[r][c] == 'P') grid[r][c] = 'R'
-                if (grid[r][c] == 'p') grid[r][c] = 'r'
+                val color = bp[r][c]
+                if (color == '.') {
+                    result[r][c] = '.'
+                    continue
+                }
+                val wantWhite = (color == 'W')
+                val prev = previousBoard[r][c]
+                if (prev != '.' && prev.isUpperCase() == wantWhite) {
+                    result[r][c] = prev
+                    continue
+                }
+                val initP = stdInit[r][c]
+                if (initP != '.' && initP.isUpperCase() == wantWhite) {
+                    result[r][c] = initP
+                    continue
+                }
+                result[r][c] = if (wantWhite) 'P' else 'p'
             }
         }
-        for (whiteSide in booleanArrayOf(true, false)) {
-            val kChar = if (whiteSide) 'K' else 'k'
-            val kings = ArrayList<Pair<Int, Int>>()
-            val anyPieces = ArrayList<Pair<Int, Int>>()
-            for (r in 0..7) {
-                for (c in 0..7) {
-                    val p = grid[r][c]
-                    if (p != '.' && p.isUpperCase() == whiteSide) {
-                        anyPieces.add(r to c)
-                        if (p == kChar) kings.add(r to c)
-                    }
-                }
-            }
-            if (kings.size > 1) {
-                val homeR = if (whiteSide) 7 else 0
-                val keep = kings.minByOrNull { abs(it.first - homeR) + abs(it.second - 4) }!!
-                for (pos in kings) {
-                    if (pos != keep) grid[pos.first][pos.second] = if (whiteSide) 'Q' else 'q'
-                }
-            } else if (kings.isEmpty() && anyPieces.isNotEmpty()) {
-                val homeR = if (whiteSide) 7 else 0
-                val best = anyPieces.minByOrNull { abs(it.first - homeR) + abs(it.second - 4) }!!
-                grid[best.first][best.second] = kChar
-            }
-        }
+        return result
     }
 
     fun createInitialBoard(): Array<CharArray> = arrayOf(
